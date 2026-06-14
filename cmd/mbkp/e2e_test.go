@@ -154,12 +154,21 @@ func waitForDB(t *testing.T, dsn string) *sql.DB {
 }
 
 // TestE2EBackupRestoreAndPITR runs the full backup → restore → PITR → purge
-// workflow for every variant in testVariants, all in parallel.
+// workflow for every variant in testVariants.
+// By default, all variants run in parallel. Set MBKP_E2E_SEQUENTIAL=1 to run
+// them sequentially (useful for debugging or resource-constrained environments).
 func TestE2EBackupRestoreAndPITR(t *testing.T) {
+	sequential := os.Getenv("MBKP_E2E_SEQUENTIAL") == "1"
+	if sequential {
+		t.Logf("Running tests sequentially (MBKP_E2E_SEQUENTIAL=1)")
+	}
+
 	for _, v := range testVariants {
 		v := v // capture for parallel closure
 		t.Run(v.Version, func(t *testing.T) {
-			t.Parallel()
+			if !sequential {
+				t.Parallel()
+			}
 			runE2EForVariant(t, v)
 		})
 	}

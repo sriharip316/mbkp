@@ -27,6 +27,8 @@ jobs:
 
             - name: Run CI (tidy, lint, test, coverage)
               run: make ci
+              env:
+                  MBKP_E2E_SEQUENTIAL: 1
 
             - name: Upload coverage to Codecov
               if: ${{ matrix.go-version == '1.25' }}
