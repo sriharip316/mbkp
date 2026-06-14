@@ -1,0 +1,57 @@
+name: Release
+
+on:
+    push:
+        tags:
+            - "v*.*.*"
+
+permissions:
+    contents: write
+
+concurrency:
+    group: release-${{ github.ref }}
+    cancel-in-progress: false
+
+jobs:
+    release:
+        name: Build and publish release
+        runs-on: ubuntu-latest
+        steps:
+            - name: Checkout repository
+              uses: actions/checkout@v4
+              with:
+                  fetch-depth: 0
+
+            - name: Set up Go
+              uses: actions/setup-go@v5
+              with:
+                  go-version-file: go.mod
+                  cache: true
+
+            - name: Show version from Makefile
+              run: make print-version
+
+            - name: Build release artifacts
+              run: make release
+
+            - name: Upload build artifacts to workflow
+              uses: actions/upload-artifact@v4
+              with:
+                  name: dist-${{ github.ref_name }}
+                  path: |
+                      dist/**
+                  if-no-files-found: error
+                  retention-days: 14
+
+            - name: Publish GitHub Release
+              uses: softprops/action-gh-release@v2
+              with:
+                  tag_name: ${{ github.ref_name }}
+                  name: tablo ${{ github.ref_name }}
+                  draft: false
+                  prerelease: ${{ contains(github.ref_name, '-') }}
+                  generate_release_notes: true
+                  files: |
+                      dist/**
+              env:
+                  GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
