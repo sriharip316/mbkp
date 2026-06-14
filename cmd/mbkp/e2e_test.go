@@ -208,6 +208,7 @@ func runE2EForVariant(t *testing.T, v testVariant) {
 	// ── 3. Start source database container ───────────────────────────────────
 	t.Logf("[%s] Starting source container (%s)…", v.Version, v.Image)
 	if _, err := runCmd("podman", "run", "--name", ctrSource, "-d",
+		"--memory=512m",
 		"-v", volData+":/var/lib/mysql",
 		"-v", volBackups+":/backups",
 		"-p", v.HostPort+":3306",
@@ -336,6 +337,7 @@ func runE2EForVariant(t *testing.T, v testVariant) {
 
 	t.Logf("[%s] Starting recovery container…", v.Version)
 	if _, err := runCmd("podman", "run", "--name", ctrRecovery, "-d",
+		"--memory=512m",
 		"-v", volData+":/var/lib/mysql",
 		"-v", volBackups+":/backups",
 		v.Image, "sleep", "1000",
@@ -372,6 +374,7 @@ func runE2EForVariant(t *testing.T, v testVariant) {
 
 	t.Logf("[%s] Restarting source container with restored files…", v.Version)
 	if _, err := runCmd("podman", "run", "--name", ctrSource, "-d",
+		"--memory=512m",
 		"-v", volData+":/var/lib/mysql",
 		"-v", volBackups+":/backups",
 		"-p", v.HostPort+":3306",
@@ -423,6 +426,7 @@ func runE2EForVariant(t *testing.T, v testVariant) {
 
 	t.Logf("[%s] Starting PITR recovery container…", v.Version)
 	if _, err := runCmd("podman", "run", "--name", ctrRecovery, "-d",
+		"--memory=512m",
 		"-v", volData+":/var/lib/mysql",
 		"-v", volBackups+":/backups",
 		v.Image, "sleep", "1000",
@@ -465,6 +469,7 @@ func runE2EForVariant(t *testing.T, v testVariant) {
 
 	t.Logf("[%s] Restarting source container with PITR-recovered files…", v.Version)
 	if _, err := runCmd("podman", "run", "--name", ctrSource, "-d",
+		"--memory=512m",
 		"-v", volData+":/var/lib/mysql",
 		"-v", volBackups+":/backups",
 		"-p", v.HostPort+":3306",
