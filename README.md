@@ -1,6 +1,6 @@
 # mbkp - MariaDB Backup & Recovery Tool
 
-[![Go Version](https://img.shields.io/badge/Go-1.25+-00ADD8?style=flat&logo=go)](https://go.dev/)
+[![Go Version](https://img.shields.io/badge/Go-1.26+-00ADD8?style=flat&logo=go)](https://go.dev/)
 [![License](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
 **mbkp** is a powerful command-line tool for managing MariaDB physical backups, restores, and Point-in-Time Recovery (PITR). It provides automated incremental backups, binary log archiving, and intelligent retention policies with dependency-aware purging.
