@@ -18,7 +18,7 @@ PKG := ./cmd/mbkp
 # Default target
 .PHONY: help
 help: ## Show this help
-	@echo "tablo Makefile targets"; echo; awk 'BEGIN {FS = ":.*##"; printf "Usage: make <target>\n\nTargets:\n"} /^[a-zA-Z0-9_.-]+:.*##/ { printf "  %-20s %s\n", $$1, $$2 }' $(MAKEFILE_LIST)
+	@awk 'BEGIN {FS = ":.*##"; printf "Usage: make <target>\n\nTargets:\n"} /^[a-zA-Z0-9_.-]+:.*##/ { printf "  %-20s %s\n", $$1, $$2 }' $(MAKEFILE_LIST)
 
 .PHONY: build
 build: ## Build the CLI binary (local OS/ARCH)
