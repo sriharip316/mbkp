@@ -157,13 +157,32 @@ func waitForDB(t *testing.T, dsn string) *sql.DB {
 // workflow for every variant in testVariants.
 // By default, all variants run in parallel. Set MBKP_E2E_SEQUENTIAL=1 to run
 // them sequentially (useful for debugging or resource-constrained environments).
+// Set MBKP_SKIP_PERCONA=1 to skip Percona Server variants (useful when Percona
+// tooling installation is slow or unavailable).
 func TestE2EBackupRestoreAndPITR(t *testing.T) {
 	sequential := os.Getenv("MBKP_E2E_SEQUENTIAL") == "1"
+	skipPercona := os.Getenv("MBKP_SKIP_PERCONA") == "1"
+
 	if sequential {
 		t.Logf("Running tests sequentially (MBKP_E2E_SEQUENTIAL=1)")
 	}
+	if skipPercona {
+		t.Logf("Skipping Percona Server tests (MBKP_SKIP_PERCONA=1)")
+	}
 
-	for _, v := range testVariants {
+	// Filter test variants based on environment variables
+	variantsToRun := testVariants
+	if skipPercona {
+		filtered := make([]testVariant, 0, len(testVariants))
+		for _, v := range testVariants {
+			if !strings.Contains(v.Image, "percona/percona-server") {
+				filtered = append(filtered, v)
+			}
+		}
+		variantsToRun = filtered
+	}
+
+	for _, v := range variantsToRun {
 		v := v // capture for parallel closure
 		t.Run(v.Version, func(t *testing.T) {
 			if !sequential {
