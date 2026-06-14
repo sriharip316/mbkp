@@ -19,23 +19,27 @@
 
 ## 📋 Table of Contents
 
-- [Installation](#installation)
-- [Prerequisites](#prerequisites)
-- [Quick Start](#quick-start)
-- [Usage](#usage)
+- [Installation](#-installation)
+- [Prerequisites](#-prerequisites)
+- [Quick Start](#-quick-start)
+- [Usage](#-usage)
   - [Backup Operations](#backup-operations)
   - [Restore Operations](#restore-operations)
   - [Point-in-Time Recovery](#point-in-time-recovery)
   - [Listing Backups](#listing-backups)
   - [Purging Old Backups](#purging-old-backups)
-- [Configuration](#configuration)
-- [Architecture](#architecture)
-- [Examples](#examples)
-- [Demo](#demo)
-- [Development](#development)
-- [License](#license)
+- [Configuration](#-configuration)
+- [Architecture](#-architecture)
+- [Examples](#-examples)
+- [Demo](#-demo)
+- [Development](#-development)
+- [License](#-license)
 
 ## 🚀 Installation
+
+### From GitHub Release
+
+Download the latest release from the [GitHub Releases page](https://github.com/sriharip316/mbkp/releases/latest).
 
 ### From Source
 
