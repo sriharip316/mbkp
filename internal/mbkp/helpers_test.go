@@ -194,90 +194,144 @@ func TestWriteCheckpointsDir(t *testing.T) {
 	}
 }
 
-func TestParseBinlogInfoFromDir(t *testing.T) {
-	tmpDir := t.TempDir()
+func TestReadBinlogInfoFile(t *testing.T) {
+	// Real content captured from the info files the supported tools write into
+	// the --extra-lsndir output.
+	xtrabackupInfo := "uuid = 53852a5d\nbinlog_pos = filename 'binlog.000002', position '325', GTID of the last change ''\nformat = file\n"
+	mariadbBackupInfo := "tool_name = mariadb-backup\nbinlog_pos = filename 'binlog.000002', position '325', GTID of the last change ''\nformat = file\n"
 
 	// 1. Missing file error
-	_, _, err := parseBinlogInfoFromDir(tmpDir)
+	tmpDir := t.TempDir()
+	_, err := readBinlogInfoFile(tmpDir)
 	if err == nil {
-		t.Error("expected error when xtrabackup_binlog_info is missing")
+		t.Error("expected error when no binlog info file is present")
 	}
 
-	// 2. Write valid content
-	infoContent := "mysql-bin.000003\t154235\t\n"
-	err = os.WriteFile(filepath.Join(tmpDir, "xtrabackup_binlog_info"), []byte(infoContent), 0644)
+	// 2. Dedicated file (xtrabackup_binlog_info, tab-separated)
+	err = os.WriteFile(filepath.Join(tmpDir, "xtrabackup_binlog_info"), []byte("binlog.000002\t325\t\n"), 0644)
 	if err != nil {
 		t.Fatalf("failed to write xtrabackup_binlog_info: %v", err)
 	}
-
-	file, pos, err := parseBinlogInfoFromDir(tmpDir)
+	content, err := readBinlogInfoFile(tmpDir)
 	if err != nil {
-		t.Fatalf("parseBinlogInfoFromDir failed: %v", err)
+		t.Fatalf("readBinlogInfoFile failed: %v", err)
 	}
-	if file != "mysql-bin.000003" {
-		t.Errorf("expected file mysql-bin.000003, got %s", file)
-	}
-	if pos != 154235 {
-		t.Errorf("expected position 154235, got %d", pos)
+	if content != "binlog.000002\t325\t\n" {
+		t.Errorf("unexpected content: %q", content)
 	}
 
-	// 3. Write invalid position format
-	err = os.WriteFile(filepath.Join(tmpDir, "xtrabackup_binlog_info"), []byte("mysql-bin.000003\tabc\n"), 0644)
+	// 3. Key=value info file (mariabackup 10.x / xtrabackup write this to the lsn dir)
+	tmpDir2 := t.TempDir()
+	err = os.WriteFile(filepath.Join(tmpDir2, "xtrabackup_info"), []byte(xtrabackupInfo), 0644)
 	if err != nil {
-		t.Fatalf("failed to write xtrabackup_binlog_info: %v", err)
+		t.Fatalf("failed to write xtrabackup_info: %v", err)
 	}
-	_, _, err = parseBinlogInfoFromDir(tmpDir)
-	if err == nil {
-		t.Error("expected error for invalid position format")
+	content, err = readBinlogInfoFile(tmpDir2)
+	if err != nil {
+		t.Fatalf("readBinlogInfoFile failed: %v", err)
+	}
+	if content != xtrabackupInfo {
+		t.Errorf("unexpected content: %q", content)
 	}
 
-	// 4. Write empty file
-	err = os.WriteFile(filepath.Join(tmpDir, "xtrabackup_binlog_info"), []byte(""), 0644)
+	// 4. MariaDB 11.1+ filename (mariadb-backup)
+	tmpDir3 := t.TempDir()
+	err = os.WriteFile(filepath.Join(tmpDir3, "mariadb_backup_info"), []byte(mariadbBackupInfo), 0644)
 	if err != nil {
-		t.Fatalf("failed to write xtrabackup_binlog_info: %v", err)
+		t.Fatalf("failed to write mariadb_backup_info: %v", err)
 	}
-	_, _, err = parseBinlogInfoFromDir(tmpDir)
-	if err == nil {
-		t.Error("expected error for empty file")
-	}
-
-	// 5. Write unexpected content format (less than 2 fields)
-	err = os.WriteFile(filepath.Join(tmpDir, "xtrabackup_binlog_info"), []byte("onlyonefield\n"), 0644)
+	content, err = readBinlogInfoFile(tmpDir3)
 	if err != nil {
-		t.Fatalf("failed to write xtrabackup_binlog_info: %v", err)
+		t.Fatalf("readBinlogInfoFile failed: %v", err)
 	}
-	_, _, err = parseBinlogInfoFromDir(tmpDir)
-	if err == nil {
-		t.Error("expected error for unexpected content format (1 field)")
+	if content != mariadbBackupInfo {
+		t.Errorf("unexpected content: %q", content)
 	}
 }
 
-func TestParseBinlogInfoFastPath(t *testing.T) {
-	tmpDir := t.TempDir()
-
-	// Create the per-run lsn dir and write xtrabackup_binlog_info
-	lsnDir := filepath.Join(tmpDir, "lsn_tmp_backup-id")
-	if err := os.MkdirAll(lsnDir, 0755); err != nil {
-		t.Fatalf("failed to create lsn dir: %v", err)
-	}
-
-	infoContent := "mysql-bin.000045\t987654\t\n"
-	err := os.WriteFile(filepath.Join(lsnDir, "xtrabackup_binlog_info"), []byte(infoContent), 0644)
+func TestParseBinlogInfoContent(t *testing.T) {
+	// 1. Dedicated-file format (xtrabackup_binlog_info): "<filename>\t<pos>"
+	file, pos, err := parseBinlogInfoContent("mysql-bin.000003\t154235\t\n")
 	if err != nil {
-		t.Fatalf("failed to write xtrabackup_binlog_info: %v", err)
+		t.Fatalf("parseBinlogInfoContent failed: %v", err)
+	}
+	if file != "mysql-bin.000003" || pos != 154235 {
+		t.Errorf("expected mysql-bin.000003/154235, got %s/%d", file, pos)
 	}
 
-	cfg := &Config{BackupDir: tmpDir, StreamBin: "mbstream"}
-	file, pos, err := parseBinlogInfo(cfg, "backup-id", "dummy-archive", lsnDir)
+	// 2. Key=value format with GTID suffix (MariaDB info files)
+	file, pos, err = parseBinlogInfoContent("uuid = x\nbinlog_pos = filename 'binlog.000002', position '325', GTID of the last change '0-1-3'\nformat = file\n")
 	if err != nil {
-		t.Fatalf("parseBinlogInfo failed: %v", err)
+		t.Fatalf("parseBinlogInfoContent failed: %v", err)
+	}
+	if file != "binlog.000002" || pos != 325 {
+		t.Errorf("expected binlog.000002/325, got %s/%d", file, pos)
 	}
 
-	if file != "mysql-bin.000045" {
-		t.Errorf("expected mysql-bin.000045, got %s", file)
+	// 3. Key=value format without GTID suffix (Percona xtrabackup_info)
+	file, pos, err = parseBinlogInfoContent("tool_name = xtrabackup\nbinlog_pos = filename 'binlog.000004', position '158'\n")
+	if err != nil {
+		t.Fatalf("parseBinlogInfoContent failed: %v", err)
 	}
-	if pos != 987654 {
-		t.Errorf("expected 987654, got %d", pos)
+	if file != "binlog.000004" || pos != 158 {
+		t.Errorf("expected binlog.000004/158, got %s/%d", file, pos)
+	}
+
+	// 4. Invalid position in dedicated-file format
+	if _, _, err := parseBinlogInfoContent("mysql-bin.000003\tabc\n"); err == nil {
+		t.Error("expected error for invalid position format")
+	}
+
+	// 5. Empty content
+	if _, _, err := parseBinlogInfoContent(""); err == nil {
+		t.Error("expected error for empty content")
+	}
+
+	// 6. Dedicated-file format with less than 2 fields
+	if _, _, err := parseBinlogInfoContent("onlyonefield\n"); err == nil {
+		t.Error("expected error for unexpected content format (1 field)")
+	}
+
+	// 7. Key=value content without a binlog_pos line
+	if _, _, err := parseBinlogInfoContent("uuid = x\nformat = file\n"); err == nil {
+		t.Error("expected error when binlog_pos line is missing")
+	}
+
+	// 8. Malformed binlog_pos line (no quoted values)
+	if _, _, err := parseBinlogInfoContent("binlog_pos = not quoted at all\n"); err == nil {
+		t.Error("expected error for malformed binlog_pos line")
+	}
+}
+
+func TestCaptureLsnInfo(t *testing.T) {
+	// A realistic per-run lsn dir as mariabackup 10.x leaves it after a
+	// streamed backup: checkpoints + key=value info file with binlog_pos.
+	lsnDir := t.TempDir()
+	checkpoints := "backup_type = full-backuped\nfrom_lsn = 0\nto_lsn = 12345678\n"
+	info := "uuid = x\nbinlog_pos = filename 'binlog.000002', position '325', GTID of the last change ''\n"
+	if err := os.WriteFile(filepath.Join(lsnDir, "xtrabackup_checkpoints"), []byte(checkpoints), 0644); err != nil {
+		t.Fatalf("failed to write checkpoints: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(lsnDir, "xtrabackup_info"), []byte(info), 0644); err != nil {
+		t.Fatalf("failed to write xtrabackup_info: %v", err)
+	}
+
+	gotCheckpoints, gotInfo, gotFile, gotPos := captureLsnInfo(lsnDir)
+	if gotCheckpoints != checkpoints {
+		t.Errorf("expected checkpoints %q, got %q", checkpoints, gotCheckpoints)
+	}
+	if gotInfo != info {
+		t.Errorf("expected info %q, got %q", info, gotInfo)
+	}
+	if gotFile != "binlog.000002" || gotPos != 325 {
+		t.Errorf("expected binlog.000002/325, got %s/%d", gotFile, gotPos)
+	}
+
+	// Empty lsn dir: capture must degrade to empty values instead of failing.
+	gotCheckpoints, gotInfo, gotFile, gotPos = captureLsnInfo(t.TempDir())
+	if gotCheckpoints != "" || gotInfo != "" || gotFile != "" || gotPos != 0 {
+		t.Errorf("expected empty capture results, got %q/%q/%s/%d",
+			gotCheckpoints, gotInfo, gotFile, gotPos)
 	}
 }
 

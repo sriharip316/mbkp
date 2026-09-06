@@ -24,6 +24,7 @@ type BackupMetadata struct {
 	BinlogPos   int64     `json:"binlog_pos"`            // Binlog position at backup end
 	ParentID    string    `json:"parent_id"`             // Empty for full, parent ID for incremental
 	Checkpoints string    `json:"checkpoints,omitempty"` // Raw content of the backup's checkpoints file (xtrabackup_checkpoints / mariadb_backup_checkpoints)
+	BinlogInfo  string    `json:"binlog_info,omitempty"` // Raw content of the backup's binlog info file (xtrabackup_binlog_info / xtrabackup_info / mariadb_backup_info)
 }
 
 // Metadata holds the full list of backups; used by the list command.
@@ -64,24 +65,27 @@ func openDB(backupDir string) (*sql.DB, error) {
 			binlog_file TEXT,
 			binlog_pos  INTEGER NOT NULL DEFAULT 0,
 			parent_id   TEXT,
-			checkpoints TEXT
+			checkpoints TEXT,
+			binlog_info TEXT
 		)
 	`); err != nil {
 		_ = db.Close()
 		return nil, fmt.Errorf("failed to create backups table: %w", err)
 	}
 
-	// Migrate databases created before the checkpoints column existed.
-	// Existing rows keep NULL checkpoints (backups taken by older mbkp versions).
-	columnExists, err := columnExists(db, "backups", "checkpoints")
-	if err != nil {
-		_ = db.Close()
-		return nil, fmt.Errorf("failed to inspect backups table schema: %w", err)
-	}
-	if !columnExists {
-		if _, err := db.Exec(`ALTER TABLE backups ADD COLUMN checkpoints TEXT`); err != nil {
+	// Migrate databases created before the checkpoints / binlog_info columns
+	// existed. Existing rows keep NULL (backups taken by older mbkp versions).
+	for _, column := range []string{"checkpoints", "binlog_info"} {
+		columnExists, err := columnExists(db, "backups", column)
+		if err != nil {
 			_ = db.Close()
-			return nil, fmt.Errorf("failed to add checkpoints column: %w", err)
+			return nil, fmt.Errorf("failed to inspect backups table schema: %w", err)
+		}
+		if !columnExists {
+			if _, err := db.Exec(fmt.Sprintf("ALTER TABLE backups ADD COLUMN %s TEXT", column)); err != nil {
+				_ = db.Close()
+				return nil, fmt.Errorf("failed to add %s column: %w", column, err)
+			}
 		}
 	}
 
@@ -116,13 +120,13 @@ func columnExists(db *sql.DB, table, column string) (bool, error) {
 func scanBackup(rows *sql.Rows) (BackupMetadata, error) {
 	var b BackupMetadata
 	var startTimeStr string
-	var endTimeStr, binlogFile, parentID, checkpoints sql.NullString
+	var endTimeStr, binlogFile, parentID, checkpoints, binlogInfo sql.NullString
 	var binlogPos int64
 
 	if err := rows.Scan(
 		&b.ID, &b.Type, &b.Status,
 		&startTimeStr, &endTimeStr,
-		&b.Path, &binlogFile, &binlogPos, &parentID, &checkpoints,
+		&b.Path, &binlogFile, &binlogPos, &parentID, &checkpoints, &binlogInfo,
 	); err != nil {
 		return b, fmt.Errorf("failed to scan backup row: %w", err)
 	}
@@ -135,12 +139,13 @@ func scanBackup(rows *sql.Rows) (BackupMetadata, error) {
 	b.BinlogPos = binlogPos
 	b.ParentID = parentID.String
 	b.Checkpoints = checkpoints.String
+	b.BinlogInfo = binlogInfo.String
 
 	return b, nil
 }
 
 const selectBackup = `
-	SELECT id, type, status, start_time, end_time, path, binlog_file, binlog_pos, parent_id, checkpoints
+	SELECT id, type, status, start_time, end_time, path, binlog_file, binlog_pos, parent_id, checkpoints, binlog_info
 	FROM backups`
 
 // AddBackup inserts a new backup row or updates an existing one (upsert by ID).
@@ -152,7 +157,7 @@ func AddBackup(backupDir string, backup BackupMetadata) error {
 	defer func() { _ = db.Close() }()
 
 	// Store nullable fields as SQL NULL when empty/zero.
-	var endTime, parentID, checkpoints interface{}
+	var endTime, parentID, checkpoints, binlogInfo interface{}
 	if !backup.EndTime.IsZero() {
 		endTime = backup.EndTime.UTC().Format(time.RFC3339Nano)
 	}
@@ -162,16 +167,20 @@ func AddBackup(backupDir string, backup BackupMetadata) error {
 	if backup.Checkpoints != "" {
 		checkpoints = backup.Checkpoints
 	}
+	if backup.BinlogInfo != "" {
+		binlogInfo = backup.BinlogInfo
+	}
 
 	_, err = db.Exec(`
-		INSERT INTO backups (id, type, status, start_time, end_time, path, binlog_file, binlog_pos, parent_id, checkpoints)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		INSERT INTO backups (id, type, status, start_time, end_time, path, binlog_file, binlog_pos, parent_id, checkpoints, binlog_info)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(id) DO UPDATE SET
 			status      = excluded.status,
 			end_time    = excluded.end_time,
 			binlog_file = excluded.binlog_file,
 			binlog_pos  = excluded.binlog_pos,
-			checkpoints = excluded.checkpoints
+			checkpoints = excluded.checkpoints,
+			binlog_info = excluded.binlog_info
 	`,
 		backup.ID, backup.Type, backup.Status,
 		backup.StartTime.UTC().Format(time.RFC3339Nano),
@@ -181,6 +190,7 @@ func AddBackup(backupDir string, backup BackupMetadata) error {
 		backup.BinlogPos,
 		parentID,
 		checkpoints,
+		binlogInfo,
 	)
 	if err != nil {
 		return fmt.Errorf("failed to upsert backup %s: %w", backup.ID, err)

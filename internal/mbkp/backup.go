@@ -65,9 +65,18 @@ func archivePath(backupDir, backupID string, comp Compressor) string {
 // mariadb_backup_checkpoints (mariadb-backup 11.1+, MDEV-18931).
 var checkpointsFileNames = []string{"xtrabackup_checkpoints", "mariadb_backup_checkpoints"}
 
-// readCheckpointsFile reads the raw content of the checkpoints file in dir,
-// accepting any of the supported tool-specific filenames.
-func readCheckpointsFile(dir string) (string, error) {
+// binlogInfoFileNames lists the filenames the supported backup tools use for
+// the info file that carries the binlog coordinates into the --extra-lsndir
+// output: xtrabackup_binlog_info / xtrabackup_info (mariabackup 10.x,
+// xtrabackup) and mariadb_backup_info (mariadb-backup 11.1+, MDEV-18931).
+// On all supported tools the key=value info file contains a "binlog_pos" line;
+// xtrabackup_binlog_info (tab-separated) is listed first in case a tool
+// version copies it as well.
+var binlogInfoFileNames = []string{"xtrabackup_binlog_info", "xtrabackup_info", "mariadb_backup_info"}
+
+// readInfoFile returns the raw content of the first file in dir whose name
+// matches one of candidates.
+func readInfoFile(dir string, candidates []string) (string, error) {
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		return "", fmt.Errorf("failed to read lsn dir %s: %w", dir, err)
@@ -76,7 +85,7 @@ func readCheckpointsFile(dir string) (string, error) {
 		if entry.IsDir() {
 			continue
 		}
-		for _, name := range checkpointsFileNames {
+		for _, name := range candidates {
 			if entry.Name() != name {
 				continue
 			}
@@ -87,8 +96,20 @@ func readCheckpointsFile(dir string) (string, error) {
 			return string(data), nil
 		}
 	}
-	return "", fmt.Errorf("no checkpoints file (%s) found in %s",
-		strings.Join(checkpointsFileNames, " or "), dir)
+	return "", fmt.Errorf("no info file (%s) found in %s",
+		strings.Join(candidates, " or "), dir)
+}
+
+// readCheckpointsFile reads the raw content of the checkpoints file in dir,
+// accepting any of the supported tool-specific filenames.
+func readCheckpointsFile(dir string) (string, error) {
+	return readInfoFile(dir, checkpointsFileNames)
+}
+
+// readBinlogInfoFile reads the raw content of the binlog info file in dir,
+// accepting any of the supported tool-specific filenames.
+func readBinlogInfoFile(dir string) (string, error) {
+	return readInfoFile(dir, binlogInfoFileNames)
 }
 
 // writeCheckpointsDir materializes checkpoint content into dir under every
@@ -152,28 +173,31 @@ func extractArchive(streamBin, src, destDir string) error {
 	return nil
 }
 
-// parseBinlogInfoFromDir reads binlog coordinates from a backup directory.
-// It first tries xtrabackup_binlog_info (mariabackup / MariaDB 10.x), then
-// falls back to mariadb_backup_info (mariadb-backup / MariaDB 11.x).
-func parseBinlogInfoFromDir(dir string) (string, int64, error) {
-	// Legacy file: one line "<filename>\t<position>" (MariaDB 10.x)
-	if f, p, err := parseLegacyBinlogInfo(filepath.Join(dir, "xtrabackup_binlog_info")); err == nil {
+// parseBinlogInfoContent parses binlog coordinates from the raw content of a
+// captured binlog info file. Two formats occur across the supported tools:
+//
+//   - the dedicated xtrabackup_binlog_info file (mariabackup 10.x, xtrabackup):
+//     a single line "<binlog_filename>\t<position>" (optionally followed by a
+//     GTID set), and
+//
+//   - the key=value info files (xtrabackup_info, mariadb_backup_info), whose
+//     binlog position is encoded in a line of the form:
+//
+//     binlog_pos = filename 'binlog.000002', position '859', GTID of the last change '0-1-3'
+func parseBinlogInfoContent(content string) (string, int64, error) {
+	// Dedicated-file format first: one line "<filename>\t<position>"
+	if f, p, err := parseLegacyBinlogInfoContent(content); err == nil {
 		return f, p, nil
 	}
-	// New file: key=value format (MariaDB 11.x / mariadb-backup)
-	return parseMariaDBBackupInfo(filepath.Join(dir, "mariadb_backup_info"))
+	// Key=value format: scan for the binlog_pos line
+	return parseMariaDBBackupInfoContent(content)
 }
 
-// parseLegacyBinlogInfo parses xtrabackup_binlog_info produced by mariabackup (MariaDB 10.x).
-// File format: a single line "<binlog_filename>\t<position>" (whitespace-separated).
-func parseLegacyBinlogInfo(path string) (string, int64, error) {
-	file, err := os.Open(path)
-	if err != nil {
-		return "", 0, err
-	}
-	defer func() { _ = file.Close() }()
-
-	scanner := bufio.NewScanner(file)
+// parseLegacyBinlogInfoContent parses the content of xtrabackup_binlog_info
+// produced by mariabackup (MariaDB 10.x) and xtrabackup.
+// Format: a single line "<binlog_filename>\t<position>" (whitespace-separated).
+func parseLegacyBinlogInfoContent(content string) (string, int64, error) {
+	scanner := bufio.NewScanner(strings.NewReader(content))
 	if scanner.Scan() {
 		line := scanner.Text()
 		fields := strings.Fields(line)
@@ -193,18 +217,13 @@ func parseLegacyBinlogInfo(path string) (string, int64, error) {
 	return "", 0, fmt.Errorf("xtrabackup_binlog_info is empty")
 }
 
-// parseMariaDBBackupInfo parses mariadb_backup_info produced by mariadb-backup (MariaDB 11.x).
-// The binlog position is encoded in a line of the form:
+// parseMariaDBBackupInfoContent parses the binlog_pos line from the key=value
+// info files (xtrabackup_info / mariadb_backup_info) all supported backup
+// tools write into the --extra-lsndir output. The line has the form:
 //
 //	binlog_pos = filename 'binlog.000002', position '859', GTID of the last change '0-1-3'
-func parseMariaDBBackupInfo(path string) (string, int64, error) {
-	file, err := os.Open(path)
-	if err != nil {
-		return "", 0, fmt.Errorf("failed to open mariadb_backup_info in %s: %w", filepath.Dir(path), err)
-	}
-	defer func() { _ = file.Close() }()
-
-	scanner := bufio.NewScanner(file)
+func parseMariaDBBackupInfoContent(content string) (string, int64, error) {
+	scanner := bufio.NewScanner(strings.NewReader(content))
 	for scanner.Scan() {
 		line := strings.TrimSpace(scanner.Text())
 		if !strings.HasPrefix(line, "binlog_pos") {
@@ -218,23 +237,23 @@ func parseMariaDBBackupInfo(path string) (string, int64, error) {
 		// Extract filename from first single-quoted token
 		fn, rest, ok := extractSingleQuoted(value)
 		if !ok {
-			return "", 0, fmt.Errorf("could not parse filename from mariadb_backup_info binlog_pos: %q", line)
+			return "", 0, fmt.Errorf("could not parse filename from binlog info binlog_pos: %q", line)
 		}
 		// Extract position from second single-quoted token
 		posStr, _, ok := extractSingleQuoted(rest)
 		if !ok {
-			return "", 0, fmt.Errorf("could not parse position from mariadb_backup_info binlog_pos: %q", line)
+			return "", 0, fmt.Errorf("could not parse position from binlog info binlog_pos: %q", line)
 		}
 		pos, err := strconv.ParseInt(posStr, 10, 64)
 		if err != nil {
-			return "", 0, fmt.Errorf("invalid binlog position %q in mariadb_backup_info: %w", posStr, err)
+			return "", 0, fmt.Errorf("invalid binlog position %q in binlog info: %w", posStr, err)
 		}
 		return fn, pos, nil
 	}
 	if err := scanner.Err(); err != nil {
-		return "", 0, fmt.Errorf("error reading mariadb_backup_info: %w", err)
+		return "", 0, fmt.Errorf("error reading binlog info: %w", err)
 	}
-	return "", 0, fmt.Errorf("binlog_pos line not found in mariadb_backup_info")
+	return "", 0, fmt.Errorf("binlog_pos line not found in binlog info content")
 }
 
 // extractSingleQuoted extracts the content of the first single-quoted substring in s.
@@ -253,31 +272,27 @@ func extractSingleQuoted(s string) (string, string, bool) {
 	return content, rest, true
 }
 
-// parseBinlogInfo resolves binlog coordinates for a backup.
-// It tries lsnDir first (fast path, no extraction): the --extra-lsndir output
-// of the backup that just ran. If the binlog info file is absent there it
-// falls back to extracting the archive.
-func parseBinlogInfo(cfg *Config, backupID, archiveFile, lsnDir string) (string, int64, error) {
-	// Fast path: read directly from the lsn dir
-	if f, p, err := parseBinlogInfoFromDir(lsnDir); err == nil {
-		return f, p, nil
+// captureLsnInfo reads the checkpoints and binlog info files the backup wrote
+// into the per-run --extra-lsndir output, and parses binlog coordinates from
+// the captured binlog info content. The backup has already succeeded at this
+// point, so capture failures are logged as warnings and yield empty values —
+// the raw content is persisted in the catalog either way.
+func captureLsnInfo(lsnDir string) (checkpoints, binlogInfo, binlogFile string, binlogPos int64) {
+	checkpoints, err := readCheckpointsFile(lsnDir)
+	if err != nil {
+		slog.Warn("failed to capture checkpoints file", "error", err)
 	}
-
-	// Slow path: binlog info file not in lsn dir — extract from archive
-	slog.Info("binlog info not in lsn dir; extracting from archive", "backup_id", backupID)
-	tmpDir := filepath.Join(cfg.BackupDir, "binloginfo_tmp_"+backupID)
-	if err := os.RemoveAll(tmpDir); err != nil {
-		return "", 0, fmt.Errorf("failed to clean binlog info tmp dir: %w", err)
+	binlogInfo, err = readBinlogInfoFile(lsnDir)
+	if err != nil {
+		slog.Warn("failed to capture binlog info file", "error", err)
 	}
-	if err := extractArchive(cfg.StreamBin, archiveFile, tmpDir); err != nil {
-		return "", 0, fmt.Errorf("failed to extract archive for binlog info: %w", err)
-	}
-	defer func() {
-		if err := os.RemoveAll(tmpDir); err != nil {
-			slog.Warn("failed to remove binlog info tmp dir", "tmp_dir", tmpDir, "error", err)
+	if binlogInfo != "" {
+		binlogFile, binlogPos, err = parseBinlogInfoContent(binlogInfo)
+		if err != nil {
+			slog.Warn("failed to parse binlog coordinates", "error", err)
 		}
-	}()
-	return parseBinlogInfoFromDir(tmpDir)
+	}
+	return checkpoints, binlogInfo, binlogFile, binlogPos
 }
 
 // streamBackup runs: <backupBin> <mariabackupArgs> | <comp> <compressArgs> > <archive>
@@ -407,21 +422,14 @@ func RunFullBackup(cfg *Config) error {
 		return err
 	}
 
-	checkpoints, err := readCheckpointsFile(lsnDir)
-	if err != nil {
-		slog.Warn("failed to capture checkpoints file", "error", err)
-	}
-
-	binlogFile, binlogPos, err := parseBinlogInfo(cfg, backupID, archive, lsnDir)
-	if err != nil {
-		slog.Warn("failed to parse binlog coordinates", "error", err)
-	}
+	checkpoints, binlogInfo, binlogFile, binlogPos := captureLsnInfo(lsnDir)
 
 	meta.Status = "completed"
 	meta.EndTime = time.Now()
 	meta.BinlogFile = binlogFile
 	meta.BinlogPos = binlogPos
 	meta.Checkpoints = checkpoints
+	meta.BinlogInfo = binlogInfo
 
 	if err := AddBackup(cfg.BackupDir, meta); err != nil {
 		return fmt.Errorf("failed to finalize backup metadata: %w", err)
@@ -533,21 +541,14 @@ func RunIncrementalBackup(cfg *Config, parentID string) error {
 		return err
 	}
 
-	checkpoints, err := readCheckpointsFile(lsnDir)
-	if err != nil {
-		slog.Warn("failed to capture checkpoints file", "error", err)
-	}
-
-	binlogFile, binlogPos, err := parseBinlogInfo(cfg, backupID, archive, lsnDir)
-	if err != nil {
-		slog.Warn("failed to parse binlog coordinates", "error", err)
-	}
+	checkpoints, binlogInfo, binlogFile, binlogPos := captureLsnInfo(lsnDir)
 
 	meta.Status = "completed"
 	meta.EndTime = time.Now()
 	meta.BinlogFile = binlogFile
 	meta.BinlogPos = binlogPos
 	meta.Checkpoints = checkpoints
+	meta.BinlogInfo = binlogInfo
 
 	if err := AddBackup(cfg.BackupDir, meta); err != nil {
 		return fmt.Errorf("failed to finalize backup metadata: %w", err)

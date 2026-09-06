@@ -187,6 +187,7 @@ func TestCheckpointsRoundTrip(t *testing.T) {
 	tmpDir := t.TempDir()
 
 	checkpoints := "backup_type = full-backuped\nfrom_lsn = 0\nto_lsn = 12345678\nlast_lsn = 12345678\n"
+	binlogInfo := "uuid = x\nbinlog_pos = filename 'binlog.000002', position '325', GTID of the last change ''\n"
 
 	b := BackupMetadata{
 		ID:          "full-cp",
@@ -195,6 +196,7 @@ func TestCheckpointsRoundTrip(t *testing.T) {
 		StartTime:   time.Now(),
 		Path:        "full-cp.xbstream.gz",
 		Checkpoints: checkpoints,
+		BinlogInfo:  binlogInfo,
 	}
 	if err := AddBackup(tmpDir, b); err != nil {
 		t.Fatalf("AddBackup failed: %v", err)
@@ -207,12 +209,17 @@ func TestCheckpointsRoundTrip(t *testing.T) {
 	if got.Checkpoints != checkpoints {
 		t.Errorf("expected checkpoints %q, got %q", checkpoints, got.Checkpoints)
 	}
+	if got.BinlogInfo != binlogInfo {
+		t.Errorf("expected binlog info %q, got %q", binlogInfo, got.BinlogInfo)
+	}
 
-	// Upsert must update checkpoints along with the completion fields.
+	// Upsert must update checkpoints and binlog info along with the completion fields.
 	updated := checkpoints + "flushed_lsn = 12345679\n"
+	updatedInfo := "uuid = x\nbinlog_pos = filename 'binlog.000003', position '512', GTID of the last change ''\n"
 	b.Status = "completed"
 	b.EndTime = time.Now()
 	b.Checkpoints = updated
+	b.BinlogInfo = updatedInfo
 	if err := AddBackup(tmpDir, b); err != nil {
 		t.Fatalf("AddBackup upsert failed: %v", err)
 	}
@@ -222,6 +229,9 @@ func TestCheckpointsRoundTrip(t *testing.T) {
 	}
 	if got.Checkpoints != updated {
 		t.Errorf("expected updated checkpoints %q, got %q", updated, got.Checkpoints)
+	}
+	if got.BinlogInfo != updatedInfo {
+		t.Errorf("expected updated binlog info %q, got %q", updatedInfo, got.BinlogInfo)
 	}
 }
 
@@ -260,7 +270,7 @@ func TestCheckpointsColumnMigration(t *testing.T) {
 	}
 	_ = oldDB.Close()
 
-	// Opening again must add the column and keep the legacy row readable.
+	// Opening again must add the missing columns and keep the legacy row readable.
 	got, err := GetBackupByID(tmpDir, "legacy-1")
 	if err != nil {
 		t.Fatalf("GetBackupByID after migration failed: %v", err)
@@ -268,8 +278,11 @@ func TestCheckpointsColumnMigration(t *testing.T) {
 	if got.Checkpoints != "" {
 		t.Errorf("expected empty checkpoints for legacy row, got %q", got.Checkpoints)
 	}
+	if got.BinlogInfo != "" {
+		t.Errorf("expected empty binlog info for legacy row, got %q", got.BinlogInfo)
+	}
 
-	// New writes must persist checkpoints through the migrated schema.
+	// New writes must persist checkpoints and binlog info through the migrated schema.
 	if err := AddBackup(tmpDir, BackupMetadata{
 		ID:          "new-1",
 		Type:        "full",
@@ -278,6 +291,7 @@ func TestCheckpointsColumnMigration(t *testing.T) {
 		EndTime:     time.Now(),
 		Path:        "new-1.xbstream.gz",
 		Checkpoints: "backup_type = full-backuped\n",
+		BinlogInfo:  "binlog.000002\t325\t\n",
 	}); err != nil {
 		t.Fatalf("AddBackup on migrated db failed: %v", err)
 	}
@@ -288,9 +302,79 @@ func TestCheckpointsColumnMigration(t *testing.T) {
 	if got.Checkpoints != "backup_type = full-backuped\n" {
 		t.Errorf("expected checkpoints on migrated db, got %q", got.Checkpoints)
 	}
+	if got.BinlogInfo != "binlog.000002\t325\t\n" {
+		t.Errorf("expected binlog info on migrated db, got %q", got.BinlogInfo)
+	}
 
 	// The catalog file must exist exactly once (no stray databases).
 	if _, err := os.Stat(filepath.Join(tmpDir, dbFileName)); err != nil {
 		t.Errorf("expected catalog at %s: %v", dbFileName, err)
+	}
+}
+
+func TestBinlogInfoColumnMigration(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	// Simulate a catalog created after the checkpoints change but before
+	// binlog_info existed: the table has checkpoints but not binlog_info.
+	oldDB, err := openDB(tmpDir)
+	if err != nil {
+		t.Fatalf("openDB failed: %v", err)
+	}
+	if _, err := oldDB.Exec(`DROP TABLE backups`); err != nil {
+		t.Fatalf("failed to drop table: %v", err)
+	}
+	if _, err := oldDB.Exec(`
+		CREATE TABLE backups (
+			id          TEXT PRIMARY KEY,
+			type        TEXT NOT NULL,
+			status      TEXT NOT NULL DEFAULT 'in_progress',
+			start_time  TEXT NOT NULL,
+			end_time    TEXT,
+			path        TEXT NOT NULL,
+			binlog_file TEXT,
+			binlog_pos  INTEGER NOT NULL DEFAULT 0,
+			parent_id   TEXT,
+			checkpoints TEXT
+		)`); err != nil {
+		t.Fatalf("failed to create intermediate table: %v", err)
+	}
+	if _, err := oldDB.Exec(`INSERT INTO backups (id, type, status, start_time, path, checkpoints) VALUES ('mid-1', 'full', 'completed', ?, 'mid-1.xbstream.gz', ?)`,
+		time.Now().UTC().Format(time.RFC3339Nano), "backup_type = full-backuped\n"); err != nil {
+		t.Fatalf("failed to insert intermediate row: %v", err)
+	}
+	_ = oldDB.Close()
+
+	// Opening again must add binlog_info while preserving the existing
+	// checkpoints content untouched.
+	got, err := GetBackupByID(tmpDir, "mid-1")
+	if err != nil {
+		t.Fatalf("GetBackupByID after migration failed: %v", err)
+	}
+	if got.Checkpoints != "backup_type = full-backuped\n" {
+		t.Errorf("expected checkpoints to survive migration, got %q", got.Checkpoints)
+	}
+	if got.BinlogInfo != "" {
+		t.Errorf("expected empty binlog info for pre-existing row, got %q", got.BinlogInfo)
+	}
+
+	// New writes must persist binlog info through the migrated schema.
+	if err := AddBackup(tmpDir, BackupMetadata{
+		ID:         "new-2",
+		Type:       "full",
+		Status:     "completed",
+		StartTime:  time.Now(),
+		EndTime:    time.Now(),
+		Path:       "new-2.xbstream.gz",
+		BinlogInfo: "binlog.000002\t325\t\n",
+	}); err != nil {
+		t.Fatalf("AddBackup on migrated db failed: %v", err)
+	}
+	got, err = GetBackupByID(tmpDir, "new-2")
+	if err != nil {
+		t.Fatalf("GetBackupByID failed: %v", err)
+	}
+	if got.BinlogInfo != "binlog.000002\t325\t\n" {
+		t.Errorf("expected binlog info on migrated db, got %q", got.BinlogInfo)
 	}
 }

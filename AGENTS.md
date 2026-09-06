@@ -51,7 +51,8 @@ CREATE TABLE IF NOT EXISTS backups (
     binlog_file TEXT,                     -- Active binlog filename at backup end (nullable)
     binlog_pos  INTEGER NOT NULL DEFAULT 0, -- Binlog position at backup end
     parent_id   TEXT,                     -- Root/parent backup ID (NULL for 'full')
-    checkpoints TEXT                      -- Raw checkpoints file content (nullable; added via guarded ALTER TABLE on open for older catalogs)
+    checkpoints TEXT,                     -- Raw checkpoints file content (nullable; added via guarded ALTER TABLE on open for older catalogs)
+    binlog_info TEXT                      -- Raw binlog info file content (nullable; added via guarded ALTER TABLE on open for older catalogs)
 );
 ```
 
@@ -76,12 +77,13 @@ graph TD
     E --> F[Run: mariabackup --backup --stream=xbstream]
     F --> G[Pipe output to compression tool]
     G --> H[Write compressed archive to disk]
-    H --> I[Capture checkpoints & parse binlog coordinates from the --extra-lsndir output]
-    I --> J[Finalize metadata: set completed status, binlog position, checkpoints & end time]
+    H --> I[Capture checkpoints & binlog info from the --extra-lsndir output; parse binlog coordinates from the captured content]
+    I --> J[Finalize metadata: set completed status, binlog position, checkpoints, binlog info & end time]
 ```
 > [!NOTE]
 > *   **Incremental Backups** base on the *chosen parent's* checkpoints, which are stored per-backup in the SQLite catalog (`checkpoints` column, raw `xtrabackup_checkpoints`/`mariadb_backup_checkpoints` file content captured via `--extra-lsndir` into a per-run temp dir `<backup-dir>/lsn_tmp_<id>` that is removed afterwards).
-> *   `--incremental-basedir` points at a temp dir (`<backup-dir>/incbase_tmp_<id>`) materialized from the parent's stored checkpoints (written under both tool-specific filenames), so the delta always matches the recorded `parent_id` — never whatever backup happened to run last. Purging a backup drops its checkpoints with its metadata row automatically.
+> *   The raw binlog info file content (`xtrabackup_info`/`mariadb_backup_info` from the same `--extra-lsndir` output) is likewise persisted per-backup in the SQLite catalog (`binlog_info` column); binlog coordinates are parsed from that captured content, so the backup archive is never decompressed or extracted just to read the info files. Purging a backup drops its checkpoints and binlog info with its metadata row automatically.
+> *   `--incremental-basedir` points at a temp dir (`<backup-dir>/incbase_tmp_<id>`) materialized from the parent's stored checkpoints (written under both tool-specific filenames), so the delta always matches the recorded `parent_id` — never whatever backup happened to run last.
 > *   An incremental fails fast if the parent is not `completed` or has no stored checkpoints (e.g. backups created by older mbkp versions); the remediation is to take a new full backup.
 
 ### 2. Restore & Prepare Workflow
