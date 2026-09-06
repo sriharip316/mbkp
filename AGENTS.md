@@ -139,14 +139,18 @@ make clean   # Cleans local binaries and logs
 ```
 
 ### Interactive Demo Script
-A comprehensive demo script (`demo.sh`) is available to validate all functionality in an isolated environment:
+A comprehensive demo script (`demo.sh`) is available to validate all functionality in an isolated environment. Select the database flavor with `--mariadb` (default) or `--mysql`:
 
 ```bash
-./demo.sh
+./demo.sh --mariadb   # MariaDB 10.11 (docker.io/library/mariadb:10.11)
+./demo.sh --mysql     # Percona Server for MySQL 8.4 LTS (docker.io/percona/percona-server:8.4)
 ```
 
+> [!NOTE]
+> The `--mysql` flavor uses Percona Server 8.4 LTS rather than the newer 9.7 LTS because Percona XtraBackup 9.7 is not GA yet and `mbkp` requires `xtrabackup` for MySQL-family servers. At container creation it installs `percona-xtrabackup-84` (via `percona-release` + `microdnf`, plus a libev RPM from Rocky Linux 9 — the same steps as `installXtrabackup` in `cmd/mbkp/e2e_test.go`) and starts the server with `--gtid-mode=ON --enforce-gtid-consistency=ON`, which is mandatory for GTID-based PITR. The `--mariadb` flavor keeps GTID-free MariaDB defaults. The `--mysql` flavor additionally requires network access inside the container to download the RPM packages.
+
 **Demo Workflow**:
-1. **Container Setup**: Creates a Podman container running MariaDB 10.11 with binary logging enabled.
+1. **Container Setup**: Creates a Podman container running MariaDB 10.11 (`--mariadb`) or Percona Server for MySQL 8.4 LTS (`--mysql`) with binary logging enabled (and GTID mode on for MySQL).
 2. **Installation**: Builds and installs `mbkp` into the container.
 3. **Test Data**: Creates database `d1` with table `t1` and inserts test records.
 4. **Backup Operations**:
