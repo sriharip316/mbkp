@@ -50,7 +50,8 @@ CREATE TABLE IF NOT EXISTS backups (
     path        TEXT NOT NULL,            -- Relative path to the archive file
     binlog_file TEXT,                     -- Active binlog filename at backup end (nullable)
     binlog_pos  INTEGER NOT NULL DEFAULT 0, -- Binlog position at backup end
-    parent_id   TEXT                      -- Root/parent backup ID (NULL for 'full')
+    parent_id   TEXT,                     -- Root/parent backup ID (NULL for 'full')
+    checkpoints TEXT                      -- Raw checkpoints file content (nullable; added via guarded ALTER TABLE on open for older catalogs)
 );
 ```
 
@@ -75,12 +76,13 @@ graph TD
     E --> F[Run: mariabackup --backup --stream=xbstream]
     F --> G[Pipe output to compression tool]
     G --> H[Write compressed archive to disk]
-    H --> I[Parse LSN & binlog coordinates from xtrabackup_binlog_info]
-    I --> J[Finalize metadata: set completed status, binlog position & end time]
+    H --> I[Capture checkpoints & parse binlog coordinates from the --extra-lsndir output]
+    I --> J[Finalize metadata: set completed status, binlog position, checkpoints & end time]
 ```
 > [!NOTE]
-> *   **Incremental Backups** utilize a shared LSN directory (`<backup-dir>/lsn`) which always holds the latest completed backup's checkpoints.
-> *   `--incremental-basedir` points to this shared folder, and `--extra-lsndir` overwrites it upon successful backup runs.
+> *   **Incremental Backups** base on the *chosen parent's* checkpoints, which are stored per-backup in the SQLite catalog (`checkpoints` column, raw `xtrabackup_checkpoints`/`mariadb_backup_checkpoints` file content captured via `--extra-lsndir` into a per-run temp dir `<backup-dir>/lsn_tmp_<id>` that is removed afterwards).
+> *   `--incremental-basedir` points at a temp dir (`<backup-dir>/incbase_tmp_<id>`) materialized from the parent's stored checkpoints (written under both tool-specific filenames), so the delta always matches the recorded `parent_id` — never whatever backup happened to run last. Purging a backup drops its checkpoints with its metadata row automatically.
+> *   An incremental fails fast if the parent is not `completed` or has no stored checkpoints (e.g. backups created by older mbkp versions); the remediation is to take a new full backup.
 
 ### 2. Restore & Prepare Workflow
 To restore an incremental backup, the system must rebuild the state step-by-step:

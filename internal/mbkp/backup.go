@@ -60,11 +60,50 @@ func archivePath(backupDir, backupID string, comp Compressor) string {
 	return filepath.Join(backupDir, backupID+comp.Ext)
 }
 
-// sharedLsnDir returns the single shared lsn directory for the backup store.
-// It always holds the latest LSN and is overwritten by every backup via --extra-lsndir.
-// Incremental backups use it as --incremental-basedir.
-func sharedLsnDir(backupDir string) string {
-	return filepath.Join(backupDir, "lsn")
+// checkpointsFileNames lists the filenames the supported backup tools use for
+// checkpoint data: xtrabackup_checkpoints (mariabackup 10.x, xtrabackup) and
+// mariadb_backup_checkpoints (mariadb-backup 11.1+, MDEV-18931).
+var checkpointsFileNames = []string{"xtrabackup_checkpoints", "mariadb_backup_checkpoints"}
+
+// readCheckpointsFile reads the raw content of the checkpoints file in dir,
+// accepting any of the supported tool-specific filenames.
+func readCheckpointsFile(dir string) (string, error) {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return "", fmt.Errorf("failed to read lsn dir %s: %w", dir, err)
+	}
+	for _, entry := range entries {
+		if entry.IsDir() {
+			continue
+		}
+		for _, name := range checkpointsFileNames {
+			if entry.Name() != name {
+				continue
+			}
+			data, err := os.ReadFile(filepath.Join(dir, entry.Name()))
+			if err != nil {
+				return "", fmt.Errorf("failed to read %s: %w", entry.Name(), err)
+			}
+			return string(data), nil
+		}
+	}
+	return "", fmt.Errorf("no checkpoints file (%s) found in %s",
+		strings.Join(checkpointsFileNames, " or "), dir)
+}
+
+// writeCheckpointsDir materializes checkpoint content into dir under every
+// supported filename so that any backup tool version can consume the directory
+// as --incremental-basedir.
+func writeCheckpointsDir(dir, content string) error {
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		return fmt.Errorf("failed to create lsn dir %s: %w", dir, err)
+	}
+	for _, name := range checkpointsFileNames {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(content), 0644); err != nil {
+			return fmt.Errorf("failed to write %s: %w", name, err)
+		}
+	}
+	return nil
 }
 
 // extractArchive decompresses and extracts an archive into destDir.
@@ -215,12 +254,11 @@ func extractSingleQuoted(s string) (string, string, bool) {
 }
 
 // parseBinlogInfo resolves binlog coordinates for a backup.
-// It tries the shared lsn dir first (fast path, no extraction).
-// If the binlog info file is absent there it falls back to extracting the archive.
-func parseBinlogInfo(cfg *Config, backupID, archiveFile string) (string, int64, error) {
-	lsnDir := sharedLsnDir(cfg.BackupDir)
-
-	// Fast path: read directly from the shared lsn dir
+// It tries lsnDir first (fast path, no extraction): the --extra-lsndir output
+// of the backup that just ran. If the binlog info file is absent there it
+// falls back to extracting the archive.
+func parseBinlogInfo(cfg *Config, backupID, archiveFile, lsnDir string) (string, int64, error) {
+	// Fast path: read directly from the lsn dir
 	if f, p, err := parseBinlogInfoFromDir(lsnDir); err == nil {
 		return f, p, nil
 	}
@@ -322,7 +360,12 @@ func RunFullBackup(cfg *Config) error {
 	timestamp := time.Now().Format("20060102_150405")
 	backupID := "full_" + timestamp
 	archive := archivePath(cfg.BackupDir, backupID, comp)
-	lsnDir := sharedLsnDir(cfg.BackupDir)
+	// Per-run temp dir receiving the --extra-lsndir output (checkpoints and
+	// binlog info); its content is persisted in the catalog before cleanup.
+	lsnDir := filepath.Join(cfg.BackupDir, "lsn_tmp_"+backupID)
+	defer func() {
+		_ = os.RemoveAll(lsnDir)
+	}()
 
 	slog.Info("Starting full backup", "id", backupID, "archive", archive)
 
@@ -364,7 +407,12 @@ func RunFullBackup(cfg *Config) error {
 		return err
 	}
 
-	binlogFile, binlogPos, err := parseBinlogInfo(cfg, backupID, archive)
+	checkpoints, err := readCheckpointsFile(lsnDir)
+	if err != nil {
+		slog.Warn("failed to capture checkpoints file", "error", err)
+	}
+
+	binlogFile, binlogPos, err := parseBinlogInfo(cfg, backupID, archive, lsnDir)
 	if err != nil {
 		slog.Warn("failed to parse binlog coordinates", "error", err)
 	}
@@ -373,6 +421,7 @@ func RunFullBackup(cfg *Config) error {
 	meta.EndTime = time.Now()
 	meta.BinlogFile = binlogFile
 	meta.BinlogPos = binlogPos
+	meta.Checkpoints = checkpoints
 
 	if err := AddBackup(cfg.BackupDir, meta); err != nil {
 		return fmt.Errorf("failed to finalize backup metadata: %w", err)
@@ -392,6 +441,10 @@ func RunIncrementalBackup(cfg *Config, parentID string) error {
 		if err != nil {
 			return fmt.Errorf("specified parent backup not found: %w", err)
 		}
+		if parentBackup.Status != "completed" {
+			return fmt.Errorf("specified parent backup %s is not completed (status: %s)",
+				parentBackup.ID, parentBackup.Status)
+		}
 	} else {
 		parentBackup, err = GetLatestBackup(cfg.BackupDir)
 		if err != nil {
@@ -402,12 +455,24 @@ func RunIncrementalBackup(cfg *Config, parentID string) error {
 		}
 	}
 
+	// The incremental delta must be taken against the backup that parent_id
+	// records, so the parent's checkpoints must be available in the catalog.
+	if parentBackup.Checkpoints == "" {
+		return fmt.Errorf("parent backup %s has no stored checkpoints (created by an older mbkp version, or capture failed at backup time); take a new full backup before running incremental backups",
+			parentBackup.ID)
+	}
+
 	comp := detectCompressor()
 
 	timestamp := time.Now().Format("20060102_150405")
 	backupID := "inc_" + timestamp
 	archive := archivePath(cfg.BackupDir, backupID, comp)
-	lsnDir := sharedLsnDir(cfg.BackupDir)
+	// Per-run temp dir receiving the --extra-lsndir output (checkpoints and
+	// binlog info); its content is persisted in the catalog before cleanup.
+	lsnDir := filepath.Join(cfg.BackupDir, "lsn_tmp_"+backupID)
+	defer func() {
+		_ = os.RemoveAll(lsnDir)
+	}()
 
 	slog.Info("Starting incremental backup",
 		"id", backupID, "parent_id", parentBackup.ID, "compressor", comp.Name)
@@ -436,13 +501,27 @@ func RunIncrementalBackup(cfg *Config, parentID string) error {
 		_ = os.RemoveAll(targetDir)
 	}()
 
-	// --incremental-basedir points to the shared lsn dir (latest xtrabackup_checkpoints).
-	// --extra-lsndir overwrites the same dir with this backup's LSN.
+	// Materialize the parent's stored checkpoints into a temporary basedir so
+	// --incremental-basedir always matches the backup that parent_id records,
+	// never whatever backup happened to run last.
+	incBaseDir := filepath.Join(cfg.BackupDir, "incbase_tmp_"+backupID)
+	if err := os.RemoveAll(incBaseDir); err != nil {
+		return fmt.Errorf("failed to clean incremental base dir: %w", err)
+	}
+	defer func() {
+		_ = os.RemoveAll(incBaseDir)
+	}()
+	if err := writeCheckpointsDir(incBaseDir, parentBackup.Checkpoints); err != nil {
+		return fmt.Errorf("failed to materialize parent checkpoints: %w", err)
+	}
+
+	// --incremental-basedir points at the materialized parent checkpoints.
+	// --extra-lsndir captures this backup's own checkpoints for later incrementals.
 	args := []string{
 		"--backup",
 		"--stream=xbstream",
 		"--target-dir=" + targetDir,
-		"--incremental-basedir=" + lsnDir,
+		"--incremental-basedir=" + incBaseDir,
 		"--extra-lsndir=" + lsnDir,
 	}
 	args = append(args, cfg.GetCommonArgs()...)
@@ -454,7 +533,12 @@ func RunIncrementalBackup(cfg *Config, parentID string) error {
 		return err
 	}
 
-	binlogFile, binlogPos, err := parseBinlogInfo(cfg, backupID, archive)
+	checkpoints, err := readCheckpointsFile(lsnDir)
+	if err != nil {
+		slog.Warn("failed to capture checkpoints file", "error", err)
+	}
+
+	binlogFile, binlogPos, err := parseBinlogInfo(cfg, backupID, archive, lsnDir)
 	if err != nil {
 		slog.Warn("failed to parse binlog coordinates", "error", err)
 	}
@@ -463,6 +547,7 @@ func RunIncrementalBackup(cfg *Config, parentID string) error {
 	meta.EndTime = time.Now()
 	meta.BinlogFile = binlogFile
 	meta.BinlogPos = binlogPos
+	meta.Checkpoints = checkpoints
 
 	if err := AddBackup(cfg.BackupDir, meta); err != nil {
 		return fmt.Errorf("failed to finalize backup metadata: %w", err)

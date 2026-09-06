@@ -122,12 +122,75 @@ func TestBackupHelpers(t *testing.T) {
 	if p != expectedPath {
 		t.Errorf("expected path %q, got %q", expectedPath, p)
 	}
+}
 
-	// Test sharedLsnDir
-	l := sharedLsnDir("/backups")
-	expectedL := filepath.Join("/backups", "lsn")
-	if l != expectedL {
-		t.Errorf("expected lsn dir %q, got %q", expectedL, l)
+func TestReadCheckpointsFile(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	checkpointsContent := "backup_type = full-backuped\nfrom_lsn = 0\nto_lsn = 12345678\n"
+
+	// 1. Missing file error
+	_, err := readCheckpointsFile(tmpDir)
+	if err == nil {
+		t.Error("expected error when no checkpoints file is present")
+	}
+
+	// 2. Legacy filename (mariabackup 10.x / xtrabackup)
+	err = os.WriteFile(filepath.Join(tmpDir, "xtrabackup_checkpoints"), []byte(checkpointsContent), 0644)
+	if err != nil {
+		t.Fatalf("failed to write xtrabackup_checkpoints: %v", err)
+	}
+	content, err := readCheckpointsFile(tmpDir)
+	if err != nil {
+		t.Fatalf("readCheckpointsFile failed: %v", err)
+	}
+	if content != checkpointsContent {
+		t.Errorf("expected %q, got %q", checkpointsContent, content)
+	}
+
+	// 3. MariaDB 11.1+ filename (mariadb-backup)
+	tmpDir2 := t.TempDir()
+	err = os.WriteFile(filepath.Join(tmpDir2, "mariadb_backup_checkpoints"), []byte(checkpointsContent), 0644)
+	if err != nil {
+		t.Fatalf("failed to write mariadb_backup_checkpoints: %v", err)
+	}
+	content, err = readCheckpointsFile(tmpDir2)
+	if err != nil {
+		t.Fatalf("readCheckpointsFile failed: %v", err)
+	}
+	if content != checkpointsContent {
+		t.Errorf("expected %q, got %q", checkpointsContent, content)
+	}
+}
+
+func TestWriteCheckpointsDir(t *testing.T) {
+	tmpDir := t.TempDir()
+	dir := filepath.Join(tmpDir, "incbase")
+
+	checkpointsContent := "backup_type = full-backuped\nfrom_lsn = 0\nto_lsn = 12345678\n"
+	if err := writeCheckpointsDir(dir, checkpointsContent); err != nil {
+		t.Fatalf("writeCheckpointsDir failed: %v", err)
+	}
+
+	// Both supported filenames must be present with the same content so any
+	// tool version can consume the directory as --incremental-basedir.
+	for _, name := range checkpointsFileNames {
+		data, err := os.ReadFile(filepath.Join(dir, name))
+		if err != nil {
+			t.Fatalf("expected %s to be written: %v", name, err)
+		}
+		if string(data) != checkpointsContent {
+			t.Errorf("expected %q in %s, got %q", checkpointsContent, name, string(data))
+		}
+	}
+
+	// Round-trip: readCheckpointsFile must recover the content.
+	content, err := readCheckpointsFile(dir)
+	if err != nil {
+		t.Fatalf("readCheckpointsFile failed: %v", err)
+	}
+	if content != checkpointsContent {
+		t.Errorf("round-trip mismatch: expected %q, got %q", checkpointsContent, content)
 	}
 }
 
@@ -192,8 +255,8 @@ func TestParseBinlogInfoFromDir(t *testing.T) {
 func TestParseBinlogInfoFastPath(t *testing.T) {
 	tmpDir := t.TempDir()
 
-	// Create shared lsn dir and write xtrabackup_binlog_info
-	lsnDir := sharedLsnDir(tmpDir)
+	// Create the per-run lsn dir and write xtrabackup_binlog_info
+	lsnDir := filepath.Join(tmpDir, "lsn_tmp_backup-id")
 	if err := os.MkdirAll(lsnDir, 0755); err != nil {
 		t.Fatalf("failed to create lsn dir: %v", err)
 	}
@@ -205,7 +268,7 @@ func TestParseBinlogInfoFastPath(t *testing.T) {
 	}
 
 	cfg := &Config{BackupDir: tmpDir, StreamBin: "mbstream"}
-	file, pos, err := parseBinlogInfo(cfg, "backup-id", "dummy-archive")
+	file, pos, err := parseBinlogInfo(cfg, "backup-id", "dummy-archive", lsnDir)
 	if err != nil {
 		t.Fatalf("parseBinlogInfo failed: %v", err)
 	}

@@ -1,6 +1,8 @@
 package mbkp
 
 import (
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 )
@@ -178,5 +180,117 @@ func TestMetadataOperations(t *testing.T) {
 	}
 	if backupsAll[0].ID != "full-1" || backupsAll[1].ID != "inc-1" {
 		t.Errorf("unexpected ordering: %v", backupsAll)
+	}
+}
+
+func TestCheckpointsRoundTrip(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	checkpoints := "backup_type = full-backuped\nfrom_lsn = 0\nto_lsn = 12345678\nlast_lsn = 12345678\n"
+
+	b := BackupMetadata{
+		ID:          "full-cp",
+		Type:        "full",
+		Status:      "in_progress",
+		StartTime:   time.Now(),
+		Path:        "full-cp.xbstream.gz",
+		Checkpoints: checkpoints,
+	}
+	if err := AddBackup(tmpDir, b); err != nil {
+		t.Fatalf("AddBackup failed: %v", err)
+	}
+
+	got, err := GetBackupByID(tmpDir, "full-cp")
+	if err != nil {
+		t.Fatalf("GetBackupByID failed: %v", err)
+	}
+	if got.Checkpoints != checkpoints {
+		t.Errorf("expected checkpoints %q, got %q", checkpoints, got.Checkpoints)
+	}
+
+	// Upsert must update checkpoints along with the completion fields.
+	updated := checkpoints + "flushed_lsn = 12345679\n"
+	b.Status = "completed"
+	b.EndTime = time.Now()
+	b.Checkpoints = updated
+	if err := AddBackup(tmpDir, b); err != nil {
+		t.Fatalf("AddBackup upsert failed: %v", err)
+	}
+	got, err = GetBackupByID(tmpDir, "full-cp")
+	if err != nil {
+		t.Fatalf("GetBackupByID failed: %v", err)
+	}
+	if got.Checkpoints != updated {
+		t.Errorf("expected updated checkpoints %q, got %q", updated, got.Checkpoints)
+	}
+}
+
+func TestCheckpointsColumnMigration(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	// Simulate a database created by an older mbkp version: the backups table
+	// exists without the checkpoints column.
+	oldDB, err := openDB(tmpDir)
+	if err != nil {
+		t.Fatalf("openDB failed: %v", err)
+	}
+	_, err = oldDB.Exec(`DROP TABLE backups`)
+	if err != nil {
+		t.Fatalf("failed to drop table: %v", err)
+	}
+	_, err = oldDB.Exec(`
+		CREATE TABLE backups (
+			id          TEXT PRIMARY KEY,
+			type        TEXT NOT NULL,
+			status      TEXT NOT NULL DEFAULT 'in_progress',
+			start_time  TEXT NOT NULL,
+			end_time    TEXT,
+			path        TEXT NOT NULL,
+			binlog_file TEXT,
+			binlog_pos  INTEGER NOT NULL DEFAULT 0,
+			parent_id   TEXT
+		)`)
+	if err != nil {
+		t.Fatalf("failed to create legacy table: %v", err)
+	}
+	_, err = oldDB.Exec(`INSERT INTO backups (id, type, status, start_time, path) VALUES ('legacy-1', 'full', 'completed', ?, 'legacy-1.xbstream.gz')`,
+		time.Now().UTC().Format(time.RFC3339Nano))
+	if err != nil {
+		t.Fatalf("failed to insert legacy row: %v", err)
+	}
+	_ = oldDB.Close()
+
+	// Opening again must add the column and keep the legacy row readable.
+	got, err := GetBackupByID(tmpDir, "legacy-1")
+	if err != nil {
+		t.Fatalf("GetBackupByID after migration failed: %v", err)
+	}
+	if got.Checkpoints != "" {
+		t.Errorf("expected empty checkpoints for legacy row, got %q", got.Checkpoints)
+	}
+
+	// New writes must persist checkpoints through the migrated schema.
+	if err := AddBackup(tmpDir, BackupMetadata{
+		ID:          "new-1",
+		Type:        "full",
+		Status:      "completed",
+		StartTime:   time.Now(),
+		EndTime:     time.Now(),
+		Path:        "new-1.xbstream.gz",
+		Checkpoints: "backup_type = full-backuped\n",
+	}); err != nil {
+		t.Fatalf("AddBackup on migrated db failed: %v", err)
+	}
+	got, err = GetBackupByID(tmpDir, "new-1")
+	if err != nil {
+		t.Fatalf("GetBackupByID failed: %v", err)
+	}
+	if got.Checkpoints != "backup_type = full-backuped\n" {
+		t.Errorf("expected checkpoints on migrated db, got %q", got.Checkpoints)
+	}
+
+	// The catalog file must exist exactly once (no stray databases).
+	if _, err := os.Stat(filepath.Join(tmpDir, dbFileName)); err != nil {
+		t.Errorf("expected catalog at %s: %v", dbFileName, err)
 	}
 }
