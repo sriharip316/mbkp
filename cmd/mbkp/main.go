@@ -170,19 +170,26 @@ var pitrCmd = &cobra.Command{
 			_ = cmd.Usage()
 			os.Exit(1)
 		}
-		parsedTime, err := time.Parse(time.RFC3339, targetTime)
+		parsedTime, err := parseTargetTime(targetTime)
 		if err != nil {
-			parsedTime, err = time.Parse("2006-01-02 15:04:05", targetTime)
-			if err != nil {
-				slog.Error("Error parsing target-time, must be in RFC3339 format (e.g. 2006-01-02T15:04:05Z or 2006-01-02T15:04:05+05:30) or 'YYYY-MM-DD HH:MM:SS'", "target_time", targetTime)
-				os.Exit(1)
-			}
+			slog.Error("Error parsing target-time, must be in RFC3339 format (e.g. 2006-01-02T15:04:05Z or 2006-01-02T15:04:05+05:30) or 'YYYY-MM-DD HH:MM:SS' (interpreted in the local timezone)", "target_time", targetTime)
+			os.Exit(1)
 		}
 		if err := mbkp.RunPITR(cfg, parsedTime, datadir); err != nil {
 			slog.Error("PITR failed", "error", err)
 			os.Exit(1)
 		}
 	},
+}
+
+// parseTargetTime parses a --target-time value, accepting RFC3339 (with an
+// explicit UTC offset) or a zoneless "YYYY-MM-DD HH:MM:SS" interpreted in the
+// local timezone, matching how mariadb-binlog interprets --stop-datetime.
+func parseTargetTime(s string) (time.Time, error) {
+	if t, err := time.Parse(time.RFC3339, s); err == nil {
+		return t, nil
+	}
+	return time.ParseInLocation("2006-01-02 15:04:05", s, time.Local)
 }
 
 var purgeCmd = &cobra.Command{
@@ -227,7 +234,7 @@ func init() {
 	restoreCmd.Flags().BoolVar(&prepareOnly, "prepare-only", false, "Prepare the backup in place but do not copy-back")
 
 	// PITR flags
-	pitrCmd.Flags().StringVar(&targetTime, "target-time", "", "Target timestamp for recovery (RFC3339 format, e.g. '2026-06-09T14:30:00Z')")
+	pitrCmd.Flags().StringVar(&targetTime, "target-time", "", "Target timestamp for recovery (RFC3339 format, e.g. '2026-06-09T14:30:00Z'; zoneless 'YYYY-MM-DD HH:MM:SS' is interpreted in the local timezone)")
 	pitrCmd.Flags().StringVar(&datadir, "datadir", "", "Target MariaDB data directory")
 
 	// Purge flags

@@ -13,14 +13,21 @@ import (
 	"time"
 )
 
+// binlogBaseName strips an optional .lz4/.gz compression suffix from a binlog filename.
+// Partial archives (".part") keep their suffix so they are never mistaken for usable binlogs.
+func binlogBaseName(name string) string {
+	if strings.HasSuffix(name, ".lz4") {
+		return strings.TrimSuffix(name, ".lz4")
+	}
+	if strings.HasSuffix(name, ".gz") {
+		return strings.TrimSuffix(name, ".gz")
+	}
+	return name
+}
+
 // isBinlogFile checks if the file is a MariaDB binary log file (has a numeric extension, optionally compressed)
 func isBinlogFile(filename string) bool {
-	// Strip compression suffix if present
-	if strings.HasSuffix(filename, ".lz4") {
-		filename = strings.TrimSuffix(filename, ".lz4")
-	} else if strings.HasSuffix(filename, ".gz") {
-		filename = strings.TrimSuffix(filename, ".gz")
-	}
+	filename = binlogBaseName(filename)
 	ext := filepath.Ext(filename) // e.g. ".000001"
 	if len(ext) < 2 {
 		return false
@@ -51,13 +58,7 @@ func getBinlogFilesToApply(binlogsDir string, startFile string) ([]string, error
 
 	var filtered []string
 	for _, name := range filenames {
-		baseName := name
-		if strings.HasSuffix(baseName, ".lz4") {
-			baseName = strings.TrimSuffix(baseName, ".lz4")
-		} else if strings.HasSuffix(baseName, ".gz") {
-			baseName = strings.TrimSuffix(baseName, ".gz")
-		}
-		if baseName >= startFile {
+		if binlogBaseName(name) >= startFile {
 			filtered = append(filtered, filepath.Join(binlogsDir, name))
 		}
 	}
@@ -192,9 +193,18 @@ func RunPITR(cfg *Config, targetTime time.Time, datadir string) error {
 		return fmt.Errorf("failed to resolve binary logs to apply: %w", err)
 	}
 
-	if len(binlogsToApply) == 0 {
-		slog.Info("No binary logs to apply. Start file not found in archived binlogs", "start_file", binlogStartFile)
-		return nil
+	// The archive must contain the start file itself. Without it, the events
+	// between the backup's end position and the next archived binlog are
+	// unrecoverable and replay would silently skip them.
+	startFilePresent := false
+	for _, p := range binlogsToApply {
+		if binlogBaseName(filepath.Base(p)) == binlogStartFile {
+			startFilePresent = true
+			break
+		}
+	}
+	if !startFilePresent {
+		return fmt.Errorf("archived binlogs do not contain start file %q (pos %d); cannot safely replay to target time", binlogStartFile, binlogStartPos)
 	}
 
 	slog.Info("Applying binary logs", "start_file", binlogStartFile, "start_pos", binlogStartPos)
@@ -215,12 +225,7 @@ func RunPITR(cfg *Config, targetTime time.Time, datadir string) error {
 	var decompressedFiles []string
 	for _, compressedPath := range binlogsToApply {
 		filename := filepath.Base(compressedPath)
-		baseName := filename
-		if strings.HasSuffix(baseName, ".lz4") {
-			baseName = strings.TrimSuffix(baseName, ".lz4")
-		} else if strings.HasSuffix(baseName, ".gz") {
-			baseName = strings.TrimSuffix(baseName, ".gz")
-		}
+		baseName := binlogBaseName(filename)
 		decompressedPath := filepath.Join(tmpBinlogDir, baseName)
 
 		if err := decompressFile(compressedPath, decompressedPath); err != nil {
@@ -230,9 +235,12 @@ func RunPITR(cfg *Config, targetTime time.Time, datadir string) error {
 	}
 
 	// 5. Construct mariadb-binlog and mariadb command execution pipeline
-	// Formats the stop datetime for mariadb-binlog. Note: mariadb-binlog expects local or UTC time string
-	// standard format "YYYY-MM-DD HH:MM:SS"
-	stopTimeStr := targetTime.Format("2006-01-02 15:04:05")
+	// Formats the stop datetime for mariadb-binlog. mariadb-binlog compares
+	// --stop-datetime against event timestamps in the host's local timezone,
+	// so render the target in Local to keep the replay boundary identical to
+	// the instant used to select the base backup.
+	// Standard format "YYYY-MM-DD HH:MM:SS"
+	stopTimeStr := targetTime.Local().Format("2006-01-02 15:04:05")
 
 	binlogArgs := []string{
 		fmt.Sprintf("--start-position=%d", binlogStartPos),
@@ -274,7 +282,7 @@ func RunPITR(cfg *Config, targetTime time.Time, datadir string) error {
 	}
 
 	if err := cmdBinlog.Wait(); err != nil {
-		slog.Warn("binlog replay tool exited with error", "binary", cfg.BinlogBin, "error", err)
+		return fmt.Errorf("%s failed; binlog replay may be incomplete: %w", cfg.BinlogBin, err)
 	}
 
 	if err := cmdMariaDB.Wait(); err != nil {

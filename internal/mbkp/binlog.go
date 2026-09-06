@@ -108,8 +108,17 @@ func BackupBinlogs(cfg *Config) error {
 		}
 
 		slog.Info("Copying and compressing binlog file", "binlog", binlog.LogName)
-		if err := compressAndCopyFile(srcPath, dstPath, comp); err != nil {
+		// Compress to a .part file and rename it into place so a failed or
+		// killed run never leaves a truncated archive that later runs would
+		// skip as "already archived".
+		tmpPath := dstPath + ".part"
+		if err := compressAndCopyFile(srcPath, tmpPath, comp); err != nil {
+			_ = os.Remove(tmpPath)
 			return fmt.Errorf("failed to archive binlog file %s: %w", binlog.LogName, err)
+		}
+		if err := os.Rename(tmpPath, dstPath); err != nil {
+			_ = os.Remove(tmpPath)
+			return fmt.Errorf("failed to finalize archived binlog file %s: %w", binlog.LogName, err)
 		}
 	}
 

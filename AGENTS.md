@@ -104,6 +104,11 @@ Point-in-Time Recovery automates recovery to a precise timestamp:
 7.  Execute `mariadb-binlog --start-position=<pos> --stop-datetime="<time>" <decompressed_binlogs...> | mariadb` to apply transactions.
 8.  Stop the temporary database server cleanly by sending `SIGTERM` and waiting for exit.
 
+> [!NOTE]
+> *   **Target Time Timezone**: `--target-time` accepts RFC3339 (with an explicit UTC offset) or a zoneless `YYYY-MM-DD HH:MM:SS` value interpreted in the host's **local** timezone. The `--stop-datetime` passed to `mariadb-binlog` is rendered in local time so the replay boundary is the same instant used to select the base backup.
+> *   **Hard-Fail on Incomplete Replay**: PITR fails if the archived binlogs do not contain the base backup's start binlog file (the events between the backup's end position and the next archived file would be unrecoverable), or if `mariadb-binlog` exits with an error — a partial replay never reports success.
+> *   **Atomic Binlog Archiving**: Binary logs are compressed to a temporary `<name>.part` file and renamed into place, so a failed or killed run never leaves a truncated archive that later runs would skip as already archived.
+
 ### 4. Backup Purging & Retention Workflow
 The `purge` command enforces the backup retention policy:
 1.  **Parse & Cutoff**: Parse retention duration (e.g. `7d`, `30d`) and compute the cutoff timestamp `now - retention`.

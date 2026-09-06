@@ -41,6 +41,9 @@ func TestIsBinlogFile(t *testing.T) {
 		{"binlog.", false},
 		{"binlog", false},
 		{".000001", true},
+		{"binlog.000001.lz4", true},
+		{"binlog.000001.gz", true},
+		{"binlog.000001.lz4.part", false}, // partial archive, not a usable binlog
 	}
 
 	for _, tt := range tests {
