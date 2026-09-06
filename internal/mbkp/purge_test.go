@@ -67,7 +67,6 @@ func TestPurgeBackups(t *testing.T) {
 			EndTime:    now.Add(-10 * 24 * time.Hour),
 			Path:       "full_old.xbstream.lz4",
 			BinlogFile: "mysql-bin.000003",
-			BinlogPos:  100,
 		},
 		{
 			ID:         "inc_old",
@@ -77,7 +76,6 @@ func TestPurgeBackups(t *testing.T) {
 			EndTime:    now.Add(-8 * 24 * time.Hour),
 			Path:       "inc_old.xbstream.lz4",
 			BinlogFile: "mysql-bin.000003",
-			BinlogPos:  200,
 			ParentID:   "full_old",
 		},
 		{
@@ -88,7 +86,6 @@ func TestPurgeBackups(t *testing.T) {
 			EndTime:    now.Add(-3 * 24 * time.Hour),
 			Path:       "inc_new.xbstream.lz4",
 			BinlogFile: "mysql-bin.000004",
-			BinlogPos:  300,
 			ParentID:   "inc_old",
 		},
 		{
@@ -99,7 +96,6 @@ func TestPurgeBackups(t *testing.T) {
 			EndTime:    now.Add(-12 * 24 * time.Hour),
 			Path:       "full_expired.xbstream.lz4",
 			BinlogFile: "mysql-bin.000001",
-			BinlogPos:  50,
 		},
 		{
 			ID:         "inc_expired",
@@ -109,7 +105,6 @@ func TestPurgeBackups(t *testing.T) {
 			EndTime:    now.Add(-11 * 24 * time.Hour),
 			Path:       "inc_expired.xbstream.lz4",
 			BinlogFile: "mysql-bin.000002",
-			BinlogPos:  75,
 			ParentID:   "full_expired",
 		},
 	}

@@ -53,7 +53,7 @@ func TestListBackups(t *testing.T) {
 		EndTime:    time.Now().Add(-59 * time.Minute),
 		Path:       "full-123.xbstream.gz",
 		BinlogFile: "mysql-bin.000001",
-		BinlogPos:  120,
+		Gtid:       "0-1-120",
 	}
 	err := AddBackup(tmpDir, b1)
 	if err != nil {

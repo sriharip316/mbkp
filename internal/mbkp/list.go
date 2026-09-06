@@ -66,7 +66,10 @@ func listTable(backupDir string, meta *Metadata) error {
 
 		binlog := "-"
 		if b.BinlogFile != "" {
-			binlog = fmt.Sprintf("%s:%d", b.BinlogFile, b.BinlogPos)
+			binlog = b.BinlogFile
+		}
+		if b.Gtid != "" {
+			binlog += " " + b.Gtid
 		}
 
 		parent := "-"

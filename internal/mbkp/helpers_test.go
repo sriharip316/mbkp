@@ -250,54 +250,67 @@ func TestReadBinlogInfoFile(t *testing.T) {
 }
 
 func TestParseBinlogInfoContent(t *testing.T) {
-	// 1. Dedicated-file format (xtrabackup_binlog_info): "<filename>\t<pos>"
-	file, pos, err := parseBinlogInfoContent("mysql-bin.000003\t154235\t\n")
+	// 1. Dedicated-file format (xtrabackup_binlog_info): "<filename>\t<pos>\t<gtid>"
+	file, gtid, err := parseBinlogInfoContent("binlog.000002\t325\t0-1-3\n")
 	if err != nil {
 		t.Fatalf("parseBinlogInfoContent failed: %v", err)
 	}
-	if file != "mysql-bin.000003" || pos != 154235 {
-		t.Errorf("expected mysql-bin.000003/154235, got %s/%d", file, pos)
+	if file != "binlog.000002" || gtid != "0-1-3" {
+		t.Errorf("expected binlog.000002/0-1-3, got %s/%s", file, gtid)
 	}
 
-	// 2. Key=value format with GTID suffix (MariaDB info files)
-	file, pos, err = parseBinlogInfoContent("uuid = x\nbinlog_pos = filename 'binlog.000002', position '325', GTID of the last change '0-1-3'\nformat = file\n")
+	// 2. Dedicated-file format without a GTID field (GTID-less server)
+	file, gtid, err = parseBinlogInfoContent("mysql-bin.000003\t154235\n")
 	if err != nil {
 		t.Fatalf("parseBinlogInfoContent failed: %v", err)
 	}
-	if file != "binlog.000002" || pos != 325 {
-		t.Errorf("expected binlog.000002/325, got %s/%d", file, pos)
+	if file != "mysql-bin.000003" || gtid != "" {
+		t.Errorf("expected mysql-bin.000003/empty, got %s/%s", file, gtid)
 	}
 
-	// 3. Key=value format without GTID suffix (Percona xtrabackup_info)
-	file, pos, err = parseBinlogInfoContent("tool_name = xtrabackup\nbinlog_pos = filename 'binlog.000004', position '158'\n")
+	// 3. Key=value format with MariaDB GTID (real content captured from 10.11)
+	file, gtid, err = parseBinlogInfoContent("uuid = x\nbinlog_pos = filename 'binlog.000002', position '840', GTID of the last change '0-1-3'\nformat = file\n")
 	if err != nil {
 		t.Fatalf("parseBinlogInfoContent failed: %v", err)
 	}
-	if file != "binlog.000004" || pos != 158 {
-		t.Errorf("expected binlog.000004/158, got %s/%d", file, pos)
+	if file != "binlog.000002" || gtid != "0-1-3" {
+		t.Errorf("expected binlog.000002/0-1-3, got %s/%s", file, gtid)
 	}
 
-	// 4. Invalid position in dedicated-file format
-	if _, _, err := parseBinlogInfoContent("mysql-bin.000003\tabc\n"); err == nil {
-		t.Error("expected error for invalid position format")
+	// 4. Key=value format with Percona GTID set (real content captured from PS 8.4 with gtid_mode=ON)
+	file, gtid, err = parseBinlogInfoContent("tool_name = xtrabackup\nbinlog_pos = filename 'binlog.000004', position '198', GTID of the last change '3cc68306-aa19-11f1-a322-b69a5dd48e22:1-3'\n")
+	if err != nil {
+		t.Fatalf("parseBinlogInfoContent failed: %v", err)
+	}
+	if file != "binlog.000004" || gtid != "3cc68306-aa19-11f1-a322-b69a5dd48e22:1-3" {
+		t.Errorf("expected binlog.000004/uuid set, got %s/%s", file, gtid)
 	}
 
-	// 5. Empty content
+	// 5. Key=value format without a GTID clause (Percona with gtid_mode=OFF)
+	file, gtid, err = parseBinlogInfoContent("tool_name = xtrabackup\nbinlog_pos = filename 'binlog.000004', position '158'\n")
+	if err != nil {
+		t.Fatalf("parseBinlogInfoContent failed: %v", err)
+	}
+	if file != "binlog.000004" || gtid != "" {
+		t.Errorf("expected binlog.000004/empty, got %s/%s", file, gtid)
+	}
+
+	// 6. Empty content
 	if _, _, err := parseBinlogInfoContent(""); err == nil {
 		t.Error("expected error for empty content")
 	}
 
-	// 6. Dedicated-file format with less than 2 fields
+	// 7. Dedicated-file format with less than 2 fields
 	if _, _, err := parseBinlogInfoContent("onlyonefield\n"); err == nil {
 		t.Error("expected error for unexpected content format (1 field)")
 	}
 
-	// 7. Key=value content without a binlog_pos line
+	// 8. Key=value content without a binlog_pos line
 	if _, _, err := parseBinlogInfoContent("uuid = x\nformat = file\n"); err == nil {
 		t.Error("expected error when binlog_pos line is missing")
 	}
 
-	// 8. Malformed binlog_pos line (no quoted values)
+	// 9. Malformed binlog_pos line (no quoted values)
 	if _, _, err := parseBinlogInfoContent("binlog_pos = not quoted at all\n"); err == nil {
 		t.Error("expected error for malformed binlog_pos line")
 	}
@@ -308,7 +321,7 @@ func TestCaptureLsnInfo(t *testing.T) {
 	// streamed backup: checkpoints + key=value info file with binlog_pos.
 	lsnDir := t.TempDir()
 	checkpoints := "backup_type = full-backuped\nfrom_lsn = 0\nto_lsn = 12345678\n"
-	info := "uuid = x\nbinlog_pos = filename 'binlog.000002', position '325', GTID of the last change ''\n"
+	info := "uuid = x\nbinlog_pos = filename 'binlog.000002', position '325', GTID of the last change '0-1-5'\n"
 	if err := os.WriteFile(filepath.Join(lsnDir, "xtrabackup_checkpoints"), []byte(checkpoints), 0644); err != nil {
 		t.Fatalf("failed to write checkpoints: %v", err)
 	}
@@ -316,22 +329,22 @@ func TestCaptureLsnInfo(t *testing.T) {
 		t.Fatalf("failed to write xtrabackup_info: %v", err)
 	}
 
-	gotCheckpoints, gotInfo, gotFile, gotPos := captureLsnInfo(lsnDir)
+	gotCheckpoints, gotFile, gotGtid := captureLsnInfo(lsnDir)
 	if gotCheckpoints != checkpoints {
 		t.Errorf("expected checkpoints %q, got %q", checkpoints, gotCheckpoints)
 	}
-	if gotInfo != info {
-		t.Errorf("expected info %q, got %q", info, gotInfo)
+	if gotFile != "binlog.000002" {
+		t.Errorf("expected binlog.000002, got %s", gotFile)
 	}
-	if gotFile != "binlog.000002" || gotPos != 325 {
-		t.Errorf("expected binlog.000002/325, got %s/%d", gotFile, gotPos)
+	if gotGtid != "0-1-5" {
+		t.Errorf("expected GTID 0-1-5, got %s", gotGtid)
 	}
 
 	// Empty lsn dir: capture must degrade to empty values instead of failing.
-	gotCheckpoints, gotInfo, gotFile, gotPos = captureLsnInfo(t.TempDir())
-	if gotCheckpoints != "" || gotInfo != "" || gotFile != "" || gotPos != 0 {
-		t.Errorf("expected empty capture results, got %q/%q/%s/%d",
-			gotCheckpoints, gotInfo, gotFile, gotPos)
+	gotCheckpoints, gotFile, gotGtid = captureLsnInfo(t.TempDir())
+	if gotCheckpoints != "" || gotFile != "" || gotGtid != "" {
+		t.Errorf("expected empty capture results, got %q/%s/%s",
+			gotCheckpoints, gotFile, gotGtid)
 	}
 }
 

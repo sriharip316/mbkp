@@ -34,6 +34,10 @@ type testVariant struct {
 	// any backup commands run.  Use it to install extra tooling (e.g. xtrabackup)
 	// that is not pre-baked into the image.  It receives the running container name.
 	Setup func(t *testing.T, containerName string)
+	// ExtraServerArgs are appended to the source container's server arguments.
+	// MySQL-family servers need GTID mode enabled: PITR replays GTID-filtered
+	// binlogs, and without gtid_mode=ON the binlogs carry no GTIDs at all.
+	ExtraServerArgs []string
 }
 
 // testVariants is the full matrix of database images exercised by the E2E suite.
@@ -68,6 +72,7 @@ var testVariants = []testVariant{
 			t.Helper()
 			installXtrabackup(t, ctrName, "percona-xtrabackup-84")
 		},
+		ExtraServerArgs: []string{"--gtid-mode=ON", "--enforce-gtid-consistency=ON"},
 	},
 	{
 		Image:       "docker.io/percona/percona-server:8.0",
@@ -78,6 +83,7 @@ var testVariants = []testVariant{
 			t.Helper()
 			installXtrabackup(t, ctrName, "percona-xtrabackup-80")
 		},
+		ExtraServerArgs: []string{"--gtid-mode=ON", "--enforce-gtid-consistency=ON"},
 	},
 }
 
@@ -235,16 +241,19 @@ func runE2EForVariant(t *testing.T, v testVariant) {
 
 	// ── 3. Start source database container ───────────────────────────────────
 	t.Logf("[%s] Starting source container (%s)…", v.Version, v.Image)
-	if _, err := runCmd("podman", "run", "--name", ctrSource, "-d",
+	runArgs := []string{
+		"run", "--name", ctrSource, "-d",
 		"--memory=512m",
-		"-v", volData+":/var/lib/mysql",
-		"-v", volBackups+":/backups",
-		"-p", v.HostPort+":3306",
-		"-e", v.RootPassEnv+"="+dbPassword,
+		"-v", volData + ":/var/lib/mysql",
+		"-v", volBackups + ":/backups",
+		"-p", v.HostPort + ":3306",
+		"-e", v.RootPassEnv + "=" + dbPassword,
 		v.Image,
 		"--log-bin=binlog",
 		"--server-id=1",
-	); err != nil {
+	}
+	runArgs = append(runArgs, v.ExtraServerArgs...)
+	if _, err := runCmd("podman", runArgs...); err != nil {
 		t.Fatalf("Failed to start source container: %v", err)
 	}
 

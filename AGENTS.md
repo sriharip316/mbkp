@@ -48,11 +48,10 @@ CREATE TABLE IF NOT EXISTS backups (
     start_time  TEXT NOT NULL,            -- ISO8601 UTC
     end_time    TEXT,                     -- ISO8601 UTC (nullable)
     path        TEXT NOT NULL,            -- Relative path to the archive file
-    binlog_file TEXT,                     -- Active binlog filename at backup end (nullable)
-    binlog_pos  INTEGER NOT NULL DEFAULT 0, -- Binlog position at backup end
+    binlog_file TEXT,                     -- Binlog filename at backup end (nullable; retention anchor & PITR archive-completeness check)
+    gtid        TEXT,                     -- GTID set at backup end (nullable; the PITR replay boundary)
     parent_id   TEXT,                     -- Root/parent backup ID (NULL for 'full')
-    checkpoints TEXT,                     -- Raw checkpoints file content (nullable; added via guarded ALTER TABLE on open for older catalogs)
-    binlog_info TEXT                      -- Raw binlog info file content (nullable; added via guarded ALTER TABLE on open for older catalogs)
+    checkpoints TEXT                      -- Raw checkpoints file content (nullable)
 );
 ```
 
@@ -77,14 +76,14 @@ graph TD
     E --> F[Run: mariabackup --backup --stream=xbstream]
     F --> G[Pipe output to compression tool]
     G --> H[Write compressed archive to disk]
-    H --> I[Capture checkpoints & binlog info from the --extra-lsndir output; parse binlog coordinates from the captured content]
-    I --> J[Finalize metadata: set completed status, binlog position, checkpoints, binlog info & end time]
+    H --> I[Capture checkpoints & binlog info from the --extra-lsndir output; parse the binlog filename & GTID set from the captured content]
+    I --> J[Finalize metadata: set completed status, binlog filename, GTID set, checkpoints & end time]
 ```
 > [!NOTE]
 > *   **Incremental Backups** base on the *chosen parent's* checkpoints, which are stored per-backup in the SQLite catalog (`checkpoints` column, raw `xtrabackup_checkpoints`/`mariadb_backup_checkpoints` file content captured via `--extra-lsndir` into a per-run temp dir `<backup-dir>/lsn_tmp_<id>` that is removed afterwards).
-> *   The raw binlog info file content (`xtrabackup_info`/`mariadb_backup_info` from the same `--extra-lsndir` output) is likewise persisted per-backup in the SQLite catalog (`binlog_info` column); binlog coordinates are parsed from that captured content, so the backup archive is never decompressed or extracted just to read the info files. Purging a backup drops its checkpoints and binlog info with its metadata row automatically.
+> *   The binlog filename and GTID set are parsed from the same `--extra-lsndir` output (the `binlog_pos = filename '…', position '…', GTID of the last change '…'` line of `xtrabackup_info`/`mariadb_backup_info`) and stored in the `binlog_file`/`gtid` columns — the backup archive is never decompressed or extracted just to read the info files. A backup with an empty GTID set (server running without GTIDs) warns at backup time; PITR refuses such backups.
 > *   `--incremental-basedir` points at a temp dir (`<backup-dir>/incbase_tmp_<id>`) materialized from the parent's stored checkpoints (written under both tool-specific filenames), so the delta always matches the recorded `parent_id` — never whatever backup happened to run last.
-> *   An incremental fails fast if the parent is not `completed` or has no stored checkpoints (e.g. backups created by older mbkp versions); the remediation is to take a new full backup.
+> *   An incremental fails fast if the parent is not `completed` or has no stored checkpoints; the remediation is to take a new full backup.
 
 ### 2. Restore & Prepare Workflow
 To restore an incremental backup, the system must rebuild the state step-by-step:
@@ -98,19 +97,23 @@ To restore an incremental backup, the system must rebuild the state step-by-step
 6.  **Copy-Back**: Verify target data directory is empty, then run `mariabackup --copy-back --target-dir=<prepareDir> --datadir=<datadir>`.
 
 ### 3. Point-in-Time Recovery (PITR)
-Point-in-Time Recovery automates recovery to a precise timestamp:
+Point-in-Time Recovery automates recovery to a precise timestamp. Replay is **GTID-based** — the recorded position-based mechanism was removed:
 1.  Query SQLite database for the closest completed backup (full or incremental) that finished **before** the target timestamp.
-2.  Perform the full restore workflow of that base backup to the target `--datadir`.
-3.  Automatically start a local temporary database daemon (`mariadbd` or `mysqld`) in the background, bound to `127.0.0.1` or socket-only, and poll for readiness (up to 2 minutes).
-4.  Read `BinlogFile` and `BinlogPos` recorded for that restored backup.
-5.  Scan the archived `binlogs/` directory to locate all binlog files starting from the base binlog.
-6.  Decompress the identified compressed binlog files into a temporary directory.
-7.  Execute `mariadb-binlog --start-position=<pos> --stop-datetime="<time>" <decompressed_binlogs...> | mariadb` to apply transactions.
-8.  Stop the temporary database server cleanly by sending `SIGTERM` and waiting for exit.
+2.  Fail fast (before restoring) if the base backup has no recorded GTID set (server ran without GTIDs, or capture failed at backup time).
+3.  Perform the full restore workflow of that base backup to the target `--datadir`.
+4.  Automatically start a local temporary database daemon (`mariadbd` or `mysqld`) in the background, bound to `127.0.0.1` or socket-only, and poll for readiness (up to 2 minutes). For MySQL-family servers the replay daemon is started with `--gtid-mode=ON --enforce-gtid-consistency=ON` (the replay stream carries `SET GTID_NEXT` statements).
+5.  Read the `gtid` and `binlog_file` recorded for that restored backup.
+6.  Scan the archived `binlogs/` directory to locate all binlog files starting from the base binlog (selection/efficiency + completeness check only — replay filtering itself is GTID-based).
+7.  Decompress the identified compressed binlog files into a temporary directory.
+8.  Execute one of the following pipelines to apply transactions:
+    *   MariaDB: `mariadb-binlog --start-position=<gtid_set> --stop-datetime="<time>" <decompressed_binlogs...> | mariadb` — since MariaDB 10.8, `--start-position` accepts a GTID list treated as "the state the replica already knows" (exclusive).
+    *   MySQL/Percona: `mysqlbinlog --exclude-gtids=<gtid_set> --stop-datetime="<time>" <decompressed_binlogs...> | mysql`.
+9.  Stop the temporary database server cleanly by sending `SIGTERM` and waiting for exit.
 
 > [!NOTE]
-> *   **Target Time Timezone**: `--target-time` accepts RFC3339 (with an explicit UTC offset) or a zoneless `YYYY-MM-DD HH:MM:SS` value interpreted in the host's **local** timezone. The `--stop-datetime` passed to `mariadb-binlog` is rendered in local time so the replay boundary is the same instant used to select the base backup.
-> *   **Hard-Fail on Incomplete Replay**: PITR fails if the archived binlogs do not contain the base backup's start binlog file (the events between the backup's end position and the next archived file would be unrecoverable), or if `mariadb-binlog` exits with an error — a partial replay never reports success.
+> *   **GTID Prerequisite**: PITR requires GTID coordinates, which MariaDB servers always record; MySQL/Percona servers must run with `--gtid-mode=ON --enforce-gtid-consistency=ON` (backups taken without GTIDs warn at backup time and are refused by PITR). Standalone single-server topologies are assumed: in multi-domain setups (Galera, multi-source) the single recorded last-change GTID may not cover every domain.
+> *   **Target Time Timezone**: `--target-time` accepts RFC3339 (with an explicit UTC offset) or a zoneless `YYYY-MM-DD HH:MM:SS` value interpreted in the host's **local** timezone. The `--stop-datetime` passed to the binlog tool is rendered in local time so the replay boundary is the same instant used to select the base backup.
+> *   **Hard-Fail on Incomplete Replay**: PITR fails if the archived binlogs do not contain the base backup's start binlog file (the events between the backup's end and the next archived file would be unrecoverable), or if the binlog tool exits with an error — a partial replay never reports success.
 > *   **Atomic Binlog Archiving**: Binary logs are compressed to a temporary `<name>.part` file and renamed into place, so a failed or killed run never leaves a truncated archive that later runs would skip as already archived.
 
 ### 4. Backup Purging & Retention Workflow

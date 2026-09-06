@@ -173,21 +173,25 @@ func extractArchive(streamBin, src, destDir string) error {
 	return nil
 }
 
-// parseBinlogInfoContent parses binlog coordinates from the raw content of a
-// captured binlog info file. Two formats occur across the supported tools:
+// parseBinlogInfoContent parses the binlog filename and GTID set from the raw
+// content of a captured binlog info file. Two formats occur across the
+// supported tools:
 //
 //   - the dedicated xtrabackup_binlog_info file (mariabackup 10.x, xtrabackup):
-//     a single line "<binlog_filename>\t<position>" (optionally followed by a
-//     GTID set), and
+//     a single tab-separated line "<binlog_filename>\t<position>\t<gtid_set>",
+//     where the position field is no longer used, and
 //
 //   - the key=value info files (xtrabackup_info, mariadb_backup_info), whose
-//     binlog position is encoded in a line of the form:
+//     coordinates are encoded in a line of the form:
 //
 //     binlog_pos = filename 'binlog.000002', position '859', GTID of the last change '0-1-3'
-func parseBinlogInfoContent(content string) (string, int64, error) {
-	// Dedicated-file format first: one line "<filename>\t<position>"
-	if f, p, err := parseLegacyBinlogInfoContent(content); err == nil {
-		return f, p, nil
+//
+// The GTID set is the replay boundary for PITR; the filename anchors binlog
+// retention and PITR archive-completeness checks.
+func parseBinlogInfoContent(content string) (string, string, error) {
+	// Dedicated-file format first: "<filename>\t<position>\t<gtid>"
+	if f, g, err := parseLegacyBinlogInfoContent(content); err == nil {
+		return f, g, nil
 	}
 	// Key=value format: scan for the binlog_pos line
 	return parseMariaDBBackupInfoContent(content)
@@ -195,26 +199,32 @@ func parseBinlogInfoContent(content string) (string, int64, error) {
 
 // parseLegacyBinlogInfoContent parses the content of xtrabackup_binlog_info
 // produced by mariabackup (MariaDB 10.x) and xtrabackup.
-// Format: a single line "<binlog_filename>\t<position>" (whitespace-separated).
-func parseLegacyBinlogInfoContent(content string) (string, int64, error) {
+// Format: a single tab-separated line "<binlog_filename>\t<position>\t<gtid_set>".
+func parseLegacyBinlogInfoContent(content string) (string, string, error) {
 	scanner := bufio.NewScanner(strings.NewReader(content))
 	if scanner.Scan() {
 		line := scanner.Text()
 		fields := strings.Fields(line)
 		if len(fields) >= 2 {
-			filename := fields[0]
-			pos, err := strconv.ParseInt(fields[1], 10, 64)
-			if err != nil {
-				return "", 0, fmt.Errorf("invalid binlog position %q in xtrabackup_binlog_info: %w", fields[1], err)
+			// The middle field is the numeric binlog position; validating it
+			// keeps this parser from matching key=value info-file lines like
+			// "uuid = x", whose second field is "=".
+			if _, err := strconv.ParseInt(fields[1], 10, 64); err != nil {
+				return "", "", fmt.Errorf("invalid binlog position %q in xtrabackup_binlog_info: %w", fields[1], err)
 			}
-			return filename, pos, nil
+			filename := fields[0]
+			gtid := ""
+			if len(fields) >= 3 {
+				gtid = fields[2]
+			}
+			return filename, gtid, nil
 		}
-		return "", 0, fmt.Errorf("unexpected content in xtrabackup_binlog_info: %q", line)
+		return "", "", fmt.Errorf("unexpected content in xtrabackup_binlog_info: %q", line)
 	}
 	if err := scanner.Err(); err != nil {
-		return "", 0, fmt.Errorf("error reading xtrabackup_binlog_info: %w", err)
+		return "", "", fmt.Errorf("error reading xtrabackup_binlog_info: %w", err)
 	}
-	return "", 0, fmt.Errorf("xtrabackup_binlog_info is empty")
+	return "", "", fmt.Errorf("xtrabackup_binlog_info is empty")
 }
 
 // parseMariaDBBackupInfoContent parses the binlog_pos line from the key=value
@@ -222,7 +232,10 @@ func parseLegacyBinlogInfoContent(content string) (string, int64, error) {
 // tools write into the --extra-lsndir output. The line has the form:
 //
 //	binlog_pos = filename 'binlog.000002', position '859', GTID of the last change '0-1-3'
-func parseMariaDBBackupInfoContent(content string) (string, int64, error) {
+//
+// The third quoted value (the GTID set) may be absent when the server runs
+// without GTIDs; the position field is no longer used.
+func parseMariaDBBackupInfoContent(content string) (string, string, error) {
 	scanner := bufio.NewScanner(strings.NewReader(content))
 	for scanner.Scan() {
 		line := strings.TrimSpace(scanner.Text())
@@ -237,23 +250,21 @@ func parseMariaDBBackupInfoContent(content string) (string, int64, error) {
 		// Extract filename from first single-quoted token
 		fn, rest, ok := extractSingleQuoted(value)
 		if !ok {
-			return "", 0, fmt.Errorf("could not parse filename from binlog info binlog_pos: %q", line)
+			return "", "", fmt.Errorf("could not parse filename from binlog info binlog_pos: %q", line)
 		}
-		// Extract position from second single-quoted token
-		posStr, _, ok := extractSingleQuoted(rest)
-		if !ok {
-			return "", 0, fmt.Errorf("could not parse position from binlog info binlog_pos: %q", line)
+		// Skip position (second quoted token); extract GTID from the third.
+		gtid := ""
+		if _, restAfterPos, ok := extractSingleQuoted(rest); ok {
+			if g, _, ok := extractSingleQuoted(restAfterPos); ok {
+				gtid = g
+			}
 		}
-		pos, err := strconv.ParseInt(posStr, 10, 64)
-		if err != nil {
-			return "", 0, fmt.Errorf("invalid binlog position %q in binlog info: %w", posStr, err)
-		}
-		return fn, pos, nil
+		return fn, gtid, nil
 	}
 	if err := scanner.Err(); err != nil {
-		return "", 0, fmt.Errorf("error reading binlog info: %w", err)
+		return "", "", fmt.Errorf("error reading binlog info: %w", err)
 	}
-	return "", 0, fmt.Errorf("binlog_pos line not found in binlog info content")
+	return "", "", fmt.Errorf("binlog_pos line not found in binlog info content")
 }
 
 // extractSingleQuoted extracts the content of the first single-quoted substring in s.
@@ -273,26 +284,30 @@ func extractSingleQuoted(s string) (string, string, bool) {
 }
 
 // captureLsnInfo reads the checkpoints and binlog info files the backup wrote
-// into the per-run --extra-lsndir output, and parses binlog coordinates from
-// the captured binlog info content. The backup has already succeeded at this
-// point, so capture failures are logged as warnings and yield empty values —
-// the raw content is persisted in the catalog either way.
-func captureLsnInfo(lsnDir string) (checkpoints, binlogInfo, binlogFile string, binlogPos int64) {
+// into the per-run --extra-lsndir output, and parses the binlog filename and
+// GTID set from the captured binlog info content. The backup has already
+// succeeded at this point, so capture failures are logged as warnings and
+// yield empty values rather than failing the run.
+func captureLsnInfo(lsnDir string) (checkpoints, binlogFile, gtid string) {
 	checkpoints, err := readCheckpointsFile(lsnDir)
 	if err != nil {
 		slog.Warn("failed to capture checkpoints file", "error", err)
 	}
-	binlogInfo, err = readBinlogInfoFile(lsnDir)
+	info, err := readBinlogInfoFile(lsnDir)
 	if err != nil {
 		slog.Warn("failed to capture binlog info file", "error", err)
 	}
-	if binlogInfo != "" {
-		binlogFile, binlogPos, err = parseBinlogInfoContent(binlogInfo)
+	if info != "" {
+		binlogFile, gtid, err = parseBinlogInfoContent(info)
 		if err != nil {
 			slog.Warn("failed to parse binlog coordinates", "error", err)
 		}
 	}
-	return checkpoints, binlogInfo, binlogFile, binlogPos
+	if gtid == "" {
+		slog.Warn("backup has no GTID coordinates; point-in-time recovery will not be possible for this backup " +
+			"(MySQL/Percona servers must run with --gtid-mode=ON --enforce-gtid-consistency=ON)")
+	}
+	return checkpoints, binlogFile, gtid
 }
 
 // streamBackup runs: <backupBin> <mariabackupArgs> | <comp> <compressArgs> > <archive>
@@ -422,21 +437,20 @@ func RunFullBackup(cfg *Config) error {
 		return err
 	}
 
-	checkpoints, binlogInfo, binlogFile, binlogPos := captureLsnInfo(lsnDir)
+	checkpoints, binlogFile, gtid := captureLsnInfo(lsnDir)
 
 	meta.Status = "completed"
 	meta.EndTime = time.Now()
 	meta.BinlogFile = binlogFile
-	meta.BinlogPos = binlogPos
+	meta.Gtid = gtid
 	meta.Checkpoints = checkpoints
-	meta.BinlogInfo = binlogInfo
 
 	if err := AddBackup(cfg.BackupDir, meta); err != nil {
 		return fmt.Errorf("failed to finalize backup metadata: %w", err)
 	}
 
 	slog.Info("Full backup completed successfully",
-		"id", backupID, "archive", archive, "binlog_file", binlogFile, "binlog_pos", binlogPos)
+		"id", backupID, "archive", archive, "binlog_file", binlogFile, "gtid", gtid)
 	return nil
 }
 
@@ -541,20 +555,19 @@ func RunIncrementalBackup(cfg *Config, parentID string) error {
 		return err
 	}
 
-	checkpoints, binlogInfo, binlogFile, binlogPos := captureLsnInfo(lsnDir)
+	checkpoints, binlogFile, gtid := captureLsnInfo(lsnDir)
 
 	meta.Status = "completed"
 	meta.EndTime = time.Now()
 	meta.BinlogFile = binlogFile
-	meta.BinlogPos = binlogPos
+	meta.Gtid = gtid
 	meta.Checkpoints = checkpoints
-	meta.BinlogInfo = binlogInfo
 
 	if err := AddBackup(cfg.BackupDir, meta); err != nil {
 		return fmt.Errorf("failed to finalize backup metadata: %w", err)
 	}
 
 	slog.Info("Incremental backup completed successfully",
-		"id", backupID, "archive", archive, "binlog_file", binlogFile, "binlog_pos", binlogPos)
+		"id", backupID, "archive", archive, "binlog_file", binlogFile, "gtid", gtid)
 	return nil
 }

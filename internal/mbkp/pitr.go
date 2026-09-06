@@ -83,6 +83,17 @@ func RunPITR(cfg *Config, targetTime time.Time, datadir string) error {
 	baseBackup := backups[len(backups)-1]
 	slog.Info("Found closest backup to restore", "id", baseBackup.ID, "type", baseBackup.Type, "end_time", baseBackup.EndTime.Format(time.RFC3339))
 
+	// Replay is GTID-based: without a recorded GTID set the post-backup events
+	// cannot be distinguished from the already-backed-up ones. Fail before the
+	// expensive restore so the operator learns immediately.
+	if baseBackup.Gtid == "" {
+		return fmt.Errorf("base backup %s has no GTID coordinates (binlog info missing at backup time, or the server ran without GTIDs; MySQL/Percona servers need --gtid-mode=ON); point-in-time recovery is not possible for this backup", baseBackup.ID)
+	}
+	// The binlog filename anchors the archive-completeness check below.
+	if baseBackup.BinlogFile == "" {
+		return fmt.Errorf("base backup %s has no binlog filename recorded; cannot verify binlog archive completeness", baseBackup.ID)
+	}
+
 	// 2. Restore the selected backup
 	slog.Info("Restoring backup", "id", baseBackup.ID)
 	// We restore it directly to the datadir (prepare + copy-back)
@@ -124,6 +135,14 @@ func RunPITR(cfg *Config, targetTime time.Time, datadir string) error {
 	} else {
 		daemonArgs = append(daemonArgs, "--port="+strconv.Itoa(cfg.Port))
 		daemonArgs = append(daemonArgs, "--bind-address=127.0.0.1")
+	}
+
+	// The replay stream carries SET GTID_NEXT statements, which a
+	// gtid_mode=OFF server rejects. MySQL-family servers default to OFF
+	// (MariaDB always has GTIDs enabled), so enable GTID mode for the
+	// temporary replay server.
+	if cfg.BinlogBin == "mysqlbinlog" {
+		daemonArgs = append(daemonArgs, "--gtid-mode=ON", "--enforce-gtid-consistency=ON")
 	}
 
 	_ = os.MkdirAll(cfg.BackupDir, 0755)
@@ -181,11 +200,6 @@ func RunPITR(cfg *Config, targetTime time.Time, datadir string) error {
 
 	// 4. Retrieve binary logs to apply
 	binlogStartFile := baseBackup.BinlogFile
-	binlogStartPos := baseBackup.BinlogPos
-
-	if binlogStartFile == "" {
-		return fmt.Errorf("base backup does not contain binlog coordinates (binlog info file missing from archive)")
-	}
 
 	binlogsDir := filepath.Join(cfg.BackupDir, "binlogs")
 	binlogsToApply, err := getBinlogFilesToApply(binlogsDir, binlogStartFile)
@@ -194,8 +208,8 @@ func RunPITR(cfg *Config, targetTime time.Time, datadir string) error {
 	}
 
 	// The archive must contain the start file itself. Without it, the events
-	// between the backup's end position and the next archived binlog are
-	// unrecoverable and replay would silently skip them.
+	// between the backup's end and the next archived binlog are unrecoverable
+	// and replay would silently skip them.
 	startFilePresent := false
 	for _, p := range binlogsToApply {
 		if binlogBaseName(filepath.Base(p)) == binlogStartFile {
@@ -204,10 +218,10 @@ func RunPITR(cfg *Config, targetTime time.Time, datadir string) error {
 		}
 	}
 	if !startFilePresent {
-		return fmt.Errorf("archived binlogs do not contain start file %q (pos %d); cannot safely replay to target time", binlogStartFile, binlogStartPos)
+		return fmt.Errorf("archived binlogs do not contain start file %q; cannot safely replay to target time", binlogStartFile)
 	}
 
-	slog.Info("Applying binary logs", "start_file", binlogStartFile, "start_pos", binlogStartPos)
+	slog.Info("Applying binary logs", "start_file", binlogStartFile, "start_gtid", baseBackup.Gtid)
 	slog.Info("Binlog files to process", "files", binlogsToApply)
 
 	// Decompress compressed binlog files to a temporary directory for processing
@@ -242,9 +256,17 @@ func RunPITR(cfg *Config, targetTime time.Time, datadir string) error {
 	// Standard format "YYYY-MM-DD HH:MM:SS"
 	stopTimeStr := targetTime.Local().Format("2006-01-02 15:04:05")
 
+	// The replay boundary is GTID-based. mariadb-binlog accepts a GTID list in
+	// --start-position (events up to and including those GTIDs are skipped —
+	// "the GTID binlog state the replica is already aware of", supported since
+	// MariaDB 10.8), while mysqlbinlog filters with --exclude-gtids instead.
 	binlogArgs := []string{
-		fmt.Sprintf("--start-position=%d", binlogStartPos),
 		fmt.Sprintf("--stop-datetime=%s", stopTimeStr),
+	}
+	if cfg.BinlogBin == "mysqlbinlog" {
+		binlogArgs = append(binlogArgs, "--exclude-gtids="+baseBackup.Gtid)
+	} else {
+		binlogArgs = append(binlogArgs, "--start-position="+baseBackup.Gtid)
 	}
 	binlogArgs = append(binlogArgs, decompressedFiles...)
 

@@ -211,9 +211,12 @@ mbkp pitr --target-time="2026-06-14 10:30:00" --datadir=/var/lib/mysql
 **How PITR Works**:
 1. Finds the closest backup completed before the target time
 2. Restores that backup
-3. Starts a temporary MariaDB instance
-4. Replays archived binary logs up to the target timestamp
+3. Starts a temporary MariaDB/MySQL instance
+4. Replays archived binary logs up to the target timestamp, filtering by GTID — only transactions after the backup's recorded GTID set are applied (`mariadb-binlog --start-position=<gtid>` for MariaDB, `mysqlbinlog --exclude-gtids=<gtid>` for MySQL/Percona)
 5. Cleanly stops the temporary instance
+
+> [!NOTE]
+> PITR requires GTID coordinates. MariaDB servers record them by default; MySQL/Percona servers must run with `--gtid-mode=ON --enforce-gtid-consistency=ON`. Backups taken without GTIDs warn at backup time and are refused by PITR.
 
 ### Listing Backups
 
@@ -337,9 +340,9 @@ CREATE TABLE backups (
     start_time  TEXT NOT NULL,           -- ISO8601 UTC timestamp
     end_time    TEXT,                    -- ISO8601 UTC timestamp (nullable)
     path        TEXT NOT NULL,           -- Relative path to archive file
-    binlog_file TEXT,                    -- Active binlog at backup completion
-    binlog_pos  INTEGER DEFAULT 0,       -- Binlog position
-    parent_id   TEXT                     -- Parent backup ID (NULL for full)
+    binlog_file TEXT,                    -- Binlog filename at backup end (retention anchor)
+    gtid        TEXT,                    -- GTID set at backup end (PITR replay boundary)
+    parent_id   TEXT,                    -- Parent backup ID (NULL for full)
 );
 ```
 
