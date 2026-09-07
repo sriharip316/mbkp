@@ -95,12 +95,13 @@ To restore an incremental backup, the system must rebuild the state step-by-step
     *   Run `mariabackup --prepare --target-dir=<prepareDir> --incremental-dir=<tempIncDir>` (for `xtrabackup`, include `--apply-log-only` on all intermediate steps, but omit it on the last incremental step).
 5.  **Finalize**: Run `mariabackup --prepare --target-dir=<prepareDir>` a final time to roll back uncommitted transactions.
 6.  **Copy-Back**: Verify target data directory is empty, then run `mariabackup --copy-back --target-dir=<prepareDir> --datadir=<datadir>`.
+7.  **Server Identity (MySQL/Percona only)**: After copy-back, rebuild `<datadir>/auto.cnf` from the `server_uuid` line recorded in the prepared backup's `backup-my.cnf` (xtrabackup deliberately excludes `auto.cnf` from archives but records the UUID there — note it uses the underscore spelling `server_uuid`, while `auto.cnf` uses `server-uuid`). This keeps `gtid_executed` a single-UUID set across recovery generations instead of fragmenting it (`A:1-100,B:1-5,…`) with a fresh UUID per restore. MariaDB restores never touch `auto.cnf` (its GTIDs are `domain-server_id-seq` based). The `--new-server-uuid` flag (`restore` and `pitr` commands) opts out: no `auto.cnf` is written (and any stale one surviving copy-back is removed), so the server generates a fresh UUID on first start. A missing/malformed UUID in `backup-my.cnf` degrades to the old behavior with a warning; a failure to write `auto.cnf` fails the restore.
 
 ### 3. Point-in-Time Recovery (PITR)
 Point-in-Time Recovery automates recovery to a precise timestamp. Replay is **GTID-based** — the recorded position-based mechanism was removed:
 1.  Query SQLite database for the closest completed backup (full or incremental) that finished **before** the target timestamp.
 2.  Fail fast (before restoring) if the base backup has no recorded GTID set (server ran without GTIDs, or capture failed at backup time).
-3.  Perform the full restore workflow of that base backup to the target `--datadir`.
+3.  Perform the full restore workflow of that base backup to the target `--datadir` (including the `auto.cnf` server-identity step for MySQL/Percona, so the replay daemon — and any server started on the datadir afterwards — adopts the backed-up `server-uuid`; pass `--new-server-uuid` to `pitr` for a fresh identity).
 4.  Automatically start a local temporary database daemon (`mariadbd` or `mysqld`) in the background, bound to `127.0.0.1` or socket-only, and poll for readiness (up to 2 minutes). For MySQL-family servers the replay daemon is started with `--gtid-mode=ON --enforce-gtid-consistency=ON` (the replay stream carries `SET GTID_NEXT` statements).
 5.  Read the `gtid` and `binlog_file` recorded for that restored backup.
 6.  Scan the archived `binlogs/` directory to locate all binlog files starting from the base binlog (selection/efficiency + completeness check only — replay filtering itself is GTID-based).
@@ -159,9 +160,10 @@ A comprehensive demo script (`demo.sh`) is available to validate all functionali
    - Binary log archiving
 5. **Listing & Metadata**: Tests both table and JSON output formats.
 6. **Purge Operations**: Validates retention policy enforcement and dependency-aware cleanup.
-7. **Full Restore**: Validates restoration of full backups with data integrity checks.
-8. **Incremental Restore**: Validates restoration of incremental backup chains.
-9. **PITR**: Tests Point-in-Time Recovery to a specific timestamp.
+7. **Full Restore**: Validates restoration of full backups with data integrity checks (and, for `--mysql`, that the `server-uuid` is preserved).
+8. **Incremental Restore**: Validates restoration of incremental backup chains (with the same `--mysql` uuid-preservation check).
+9. **New-Server-UUID Restore**: Restores with `--new-server-uuid` and (for `--mysql`) asserts a fresh `server-uuid` is generated; for MariaDB the flag is exercised as a no-op.
+10. **PITR**: Tests Point-in-Time Recovery to a specific timestamp (with the same `--mysql` uuid-preservation check).
 
 **Prerequisites**:
 - `podman` (container runtime)
@@ -202,4 +204,5 @@ These tests use Podman/Docker to orchestrate isolated MariaDB containers and val
 > *   **Latest Binlog Exclusion**: When backing up binary logs, always exclude the latest active binary log file created after the log flush.
 > *   **Temporary Binlog Cleanup**: Any temporary binlog decompression directories created during PITR execution must be defer-cleaned up.
 > *   **Credentials Security**: Never pass the database password as a command line argument (e.g. `--password`) to external utilities or print it in application logs. Use the `MYSQL_PWD` environment variable to securely pass the password to child processes.
+> *   **Server-UUID Restoration Safety**: The restored `server-uuid` reuses the backup's identity on purpose; never run such a server concurrently with the original (or another clone of the same backup) in a replication topology — duplicate UUIDs make replication fail fatally and divergent GTID histories get silently skipped by replicas. Document `--new-server-uuid` as the escape hatch for clone scenarios. The MariaDB path must never write `auto.cnf`.
 > *   **Backup Tool Detection**: Three mutually exclusive backup tools are supported: `mariadb-backup` (MariaDB 11.x), `mariabackup` (MariaDB 10.x), and `xtrabackup` (Percona/MySQL). `detectBackupTools()` (in `config.go`) resolves all four companion binaries (`BackupBin`, `StreamBin`, `BinlogBin`, `ClientBin`) at startup. Always use the `cfg.*Bin` fields; never hard-code a binary name. Percona XtraBackup uses `xbstream` (not `mbstream`) for extraction and `mysqlbinlog`/`mysql` for binlog replay.

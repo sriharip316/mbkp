@@ -266,6 +266,18 @@ func runE2EForVariant(t *testing.T, v testVariant) {
 	db := waitForDB(t, dsn)
 	defer func() { _ = db.Close() }()
 
+	// Capture the source server's UUID for MySQL/Percona variants: restores
+	// must preserve it (auto.cnf rebuilt from backup-my.cnf) so the GTID
+	// identity survives recovery. MariaDB has no @@server_uuid system
+	// variable, and its restores intentionally leave identity to the server.
+	isPercona := strings.Contains(v.Image, "percona")
+	var sourceServerUUID string
+	if isPercona {
+		if err := db.QueryRow("SELECT @@server_uuid").Scan(&sourceServerUUID); err != nil {
+			t.Fatalf("Failed to read source server uuid: %v", err)
+		}
+	}
+
 	// ── 6. Create test schema and seed initial data ───────────────────────────
 	t.Logf("[%s] Creating test schema and seeding initial data…", v.Version)
 	if _, err := db.Exec("CREATE DATABASE testdb"); err != nil {
@@ -452,6 +464,17 @@ func runE2EForVariant(t *testing.T, v testVariant) {
 	if len(vals) != 2 || vals[0] != "initial_data" || vals[1] != "incremental_data" {
 		t.Fatalf("Unexpected row values in restored table: %v", vals)
 	}
+
+	if isPercona {
+		var restoredUUID string
+		if err := db.QueryRow("SELECT @@server_uuid").Scan(&restoredUUID); err != nil {
+			t.Fatalf("Failed to read restored server uuid: %v", err)
+		}
+		if restoredUUID != sourceServerUUID {
+			t.Fatalf("Restored server-uuid %q does not match source uuid %q; expected the backup's uuid to be preserved", restoredUUID, sourceServerUUID)
+		}
+		t.Logf("[%s] Restored server-uuid preserved: %s", v.Version, restoredUUID)
+	}
 	t.Logf("[%s] Physical restore verified successfully!", v.Version)
 
 	// ==========================================================================
@@ -548,6 +571,17 @@ func runE2EForVariant(t *testing.T, v testVariant) {
 		if val != expectedVals[i] {
 			t.Fatalf("Expected row %d value %q, got %q", i, expectedVals[i], val)
 		}
+	}
+
+	if isPercona {
+		var recoveredUUID string
+		if err := db.QueryRow("SELECT @@server_uuid").Scan(&recoveredUUID); err != nil {
+			t.Fatalf("Failed to read PITR-recovered server uuid: %v", err)
+		}
+		if recoveredUUID != sourceServerUUID {
+			t.Fatalf("PITR-recovered server-uuid %q does not match source uuid %q; expected the backup's uuid to be preserved", recoveredUUID, sourceServerUUID)
+		}
+		t.Logf("[%s] PITR-recovered server-uuid preserved: %s", v.Version, recoveredUUID)
 	}
 	t.Logf("[%s] PITR recovery verified! All 3 rows present, pitr_data_2 correctly absent.", v.Version)
 

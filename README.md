@@ -10,6 +10,7 @@
 - **Full & Incremental Backups**: Efficient physical backups using `mariabackup`, `mariadb-backup`, or `xtrabackup`
 - **Binary Log Archiving**: Automated archival of MariaDB binary logs for PITR
 - **Point-in-Time Recovery (PITR)**: Restore your database to any specific timestamp
+- **Server-UUID Preservation (MySQL/Percona)**: Restores keep the backed-up server's GTID identity instead of fragmenting `gtid_executed` across a new UUID per recovery; opt out with `--new-server-uuid` for clones
 - **Intelligent Retention**: Dependency-aware backup purging that preserves restoration chains
 - **Compression Support**: Automatic LZ4 or GZIP compression for optimal storage efficiency
 - **Metadata Tracking**: SQLite-based backup catalog for fast queries and lineage tracking
@@ -196,6 +197,21 @@ mbkp restore --backup-id=20260614_103000 --prepare-only
 - Stop MariaDB before running restore
 - Ensure proper file ownership after restore
 
+#### Server Identity (MySQL/Percona)
+
+XtraBackup deliberately excludes `auto.cnf` from backups, so a restored server would normally boot with a freshly generated `server-uuid` — and since replayed GTIDs keep the original UUID while new writes use the new one, `gtid_executed` fragments into one extra UUID set per recovery generation (`A:1-100,B:1-5,…`).
+
+For MySQL/Percona backups `mbkp` instead rebuilds `<datadir>/auto.cnf` from the `server_uuid` recorded in the backup's `backup-my.cnf`, so the recovered server continues the original GTID identity. MariaDB is unaffected (its GTIDs do not use UUIDs).
+
+```bash
+# Restore with a fresh server-uuid instead (e.g. the restored server will run
+# alongside the original as a clone)
+mbkp restore --datadir=/var/lib/mysql --new-server-uuid
+```
+
+> [!WARNING]
+> Never run a server restored *without* `--new-server-uuid` concurrently with the original server (or another clone of the same backup) in a replication topology: duplicate server-uuids make replication fail fatally, and two writers under one UUID produce divergent GTID histories that replicas silently skip.
+
 ### Point-in-Time Recovery
 
 Restore your database to a specific timestamp by automatically finding the appropriate backup and replaying binary logs:
@@ -217,6 +233,8 @@ mbkp pitr --target-time="2026-06-14 10:30:00" --datadir=/var/lib/mysql
 
 > [!NOTE]
 > PITR requires GTID coordinates. MariaDB servers record them by default; MySQL/Percona servers must run with `--gtid-mode=ON --enforce-gtid-consistency=ON`. Backups taken without GTIDs warn at backup time and are refused by PITR.
+>
+> PITR restores the backup's `server-uuid` into the recovered datadir (MySQL/Percona), so the temporary replay daemon — and any server started on the datadir afterwards — continues the original GTID identity. Pass `--new-server-uuid` to `mbkp pitr` to recover with a fresh identity instead.
 
 ### Listing Backups
 

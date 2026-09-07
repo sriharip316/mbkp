@@ -189,6 +189,30 @@ function get_count {
     db_exec -ABNe "SELECT COUNT(*) FROM d1.t1"
 }
 
+function get_uuid {
+    # MariaDB has no @@server_uuid system variable; its restores never
+    # re-establish one, so there is nothing to report for that flavor.
+    db_exec -ABNe "SELECT @@server_uuid" 2>/dev/null || echo ""
+}
+
+# verify_uuid_preserved asserts that the server booted on the restored datadir
+# kept the pre-restore identity. Only the MySQL flavor restores the uuid
+# (MariaDB GTIDs do not use uuids), so mismatches are fatal there only.
+function verify_uuid_preserved {
+    local uuid="$1"
+    local new_uuid
+    new_uuid=$(get_uuid)
+    if [[ -z "$uuid" && -z "$new_uuid" ]]; then
+        echo "Server uuid: n/a (MariaDB has no @@server_uuid; uuids are never restored)"
+        return 0
+    fi
+    if [[ "${CLIENT_BIN}" == "mysql" && "$new_uuid" != "$uuid" ]]; then
+        echo "Restore failed: server-uuid mismatch ($uuid vs $new_uuid)"
+        exit 1
+    fi
+    echo "Server uuid after restore: $new_uuid (before: $uuid)"
+}
+
 function delete_data {
     write_section "Deleting data"
     db_exec -e "DELETE FROM d1.t1"
@@ -255,6 +279,8 @@ function test_restore__full_backup {
     insert_data
     local count
     count=$(get_count)
+    local uuid
+    uuid=$(get_uuid)
     full_backup
     delete_data
     cleanup_data_directory
@@ -269,6 +295,7 @@ function test_restore__full_backup {
     elif [[ "$new_count" -eq "$count" ]]; then
         echo "Restore succeeded: count matches (count=$count)"
     fi
+    verify_uuid_preserved "$uuid"
 }
 
 function test_restore__incremental_backup {
@@ -279,6 +306,8 @@ function test_restore__incremental_backup {
     insert_data
     local count
     count=$(get_count)
+    local uuid
+    uuid=$(get_uuid)
     incremental_backup
     local inc_backup
     inc_backup=$(podman exec "${CONTAINER}" mbkp --backup-dir="${BKP_DIR}" list | grep inc | awk '{print $1}')
@@ -295,6 +324,7 @@ function test_restore__incremental_backup {
     elif [[ "$new_count" -eq "$count" ]]; then
         echo "Restore succeeded: count matches (count=$count)"
     fi
+    verify_uuid_preserved "$uuid"
 }
 
 function test_pitr {
@@ -306,6 +336,8 @@ function test_pitr {
     insert_data
     local count
     count=$(get_count)
+    local uuid
+    uuid=$(get_uuid)
     sleep 1
     local restore_time
     restore_time=$(date -u +%Y-%m-%dT%H:%M:%SZ)
@@ -322,8 +354,42 @@ function test_pitr {
     if [ "$new_count" -ne "$count" ]; then
         echo "PITR failed: count mismatch ($count vs $new_count)"
         exit 1
-    elif [[ "$new_count" -eq "$count" ]]; then
+    elif [ "$new_count" -eq "$count" ]; then
         echo "PITR succeeded: count matches (count=$count)"
+    fi
+    verify_uuid_preserved "$uuid"
+}
+
+function test_restore__new_server_uuid {
+    write_section "Testing restore full backup with --new-server-uuid"
+    purge_backups 1s
+    insert_data
+    full_backup
+    local count
+    count=$(get_count)
+    local uuid
+    uuid=$(get_uuid)
+    delete_data
+    cleanup_data_directory
+    podman exec "${CONTAINER}" mbkp --backup-dir="${BKP_DIR}" restore --datadir=/var/lib/mysql --new-server-uuid
+    set_permissions
+    start_server
+    local new_count
+    new_count=$(get_count)
+    if [ "$new_count" -ne "$count" ]; then
+        echo "Restore failed: count mismatch ($count vs $new_count)"
+        exit 1
+    fi
+    local new_uuid
+    new_uuid=$(get_uuid)
+    if [[ "${CLIENT_BIN}" == "mysql" ]]; then
+        if [[ "$new_uuid" == "$uuid" ]]; then
+            echo "Restore with --new-server-uuid failed: server-uuid was preserved ($uuid) but a fresh uuid was requested"
+            exit 1
+        fi
+        echo "Fresh server-uuid generated: $uuid -> $new_uuid"
+    else
+        echo "--new-server-uuid is a no-op for MariaDB (uuids are never restored); current uuid: ${new_uuid:-(none)}"
     fi
 }
 
@@ -338,6 +404,7 @@ function main {
     test_purge
     test_restore__full_backup
     test_restore__incremental_backup
+    test_restore__new_server_uuid
     test_pitr
 }
 

@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 )
 
 // copyDir recursively copies a directory tree, preserving permissions.
@@ -186,7 +187,108 @@ func targetIDError(backupID string, err error) error {
 	return err
 }
 
-func RestoreBackup(cfg *Config, backupID string, datadir string, prepareOnly bool) error {
+const backupMyCnfFile = "backup-my.cnf"
+const autoCnfFile = "auto.cnf"
+
+// isValidServerUUID reports whether s is a canonical 8-4-4-4-12 hexadecimal
+// UUID, the shape MySQL writes for server-uuid.
+func isValidServerUUID(s string) bool {
+	if len(s) != 36 {
+		return false
+	}
+	for i, c := range s {
+		switch i {
+		case 8, 13, 18, 23:
+			if c != '-' {
+				return false
+			}
+		default:
+			isHex := (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F')
+			if !isHex {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+// readServerUUID extracts the backed-up server's UUID from the backup-my.cnf
+// file xtrabackup writes into every backup (auto.cnf itself is deliberately
+// excluded from xtrabackup archives). Returns an empty string when the file or
+// the server-uuid line is missing or malformed; callers treat that as "no
+// recorded identity" and let the restored server generate a fresh UUID.
+func readServerUUID(prepareDir string) string {
+	path := filepath.Join(prepareDir, backupMyCnfFile)
+	data, err := os.ReadFile(path)
+	if err != nil {
+		slog.Warn("failed to read backup-my.cnf; the restored server will generate a fresh UUID", "path", path, "error", err)
+		return ""
+	}
+	for _, line := range strings.Split(string(data), "\n") {
+		name, value, found := strings.Cut(strings.TrimSpace(line), "=")
+		if !found {
+			continue
+		}
+		// xtrabackup writes the key as "server_uuid" (underscore) while
+		// auto.cnf uses "server-uuid" (hyphen); accept both spellings.
+		name = strings.ReplaceAll(strings.TrimSpace(name), "_", "-")
+		if !strings.EqualFold(name, "server-uuid") {
+			continue
+		}
+		value = strings.Trim(strings.TrimSpace(value), `"'`)
+		if !isValidServerUUID(value) {
+			slog.Warn("backup-my.cnf contains a malformed server-uuid; the restored server will generate a fresh UUID", "value", value)
+			return ""
+		}
+		return value
+	}
+	slog.Warn("backup-my.cnf has no server-uuid entry; the restored server will generate a fresh UUID", "path", path)
+	return ""
+}
+
+// writeAutoCnf writes <datadir>/auto.cnf with the backed-up server-uuid so the
+// restored server reuses the original's GTID identity. Without it every
+// restore boots with a fresh UUID, fragmenting gtid_executed across one new
+// UUID per recovery generation.
+func writeAutoCnf(datadir, uuid string) error {
+	content := "[auto]\nserver-uuid=" + uuid + "\n"
+	return os.WriteFile(filepath.Join(datadir, autoCnfFile), []byte(content), 0644)
+}
+
+// restoreServerUUID re-establishes the backed-up server's identity after
+// copy-back for MySQL/Percona backups (MariaDB GTIDs do not use UUIDs, so the
+// MariaDB path is left untouched). With newServerUUID set, any auto.cnf that
+// survived copy-back is removed so the server generates a fresh UUID instead.
+func restoreServerUUID(cfg *Config, prepareDir, datadir string, newServerUUID bool) error {
+	if cfg.BackupBin != "xtrabackup" {
+		return nil
+	}
+	autoCnfPath := filepath.Join(datadir, autoCnfFile)
+
+	if newServerUUID {
+		// The operator explicitly asked for a fresh identity (e.g. the
+		// restored server will run alongside the original as a clone).
+		if _, err := os.Stat(autoCnfPath); err == nil {
+			if err := os.Remove(autoCnfPath); err != nil {
+				return fmt.Errorf("failed to remove %s: %w", autoCnfPath, err)
+			}
+		}
+		slog.Info("Skipping server-uuid restoration; the server will generate a fresh UUID on first start")
+		return nil
+	}
+
+	uuid := readServerUUID(prepareDir)
+	if uuid == "" {
+		return nil
+	}
+	if err := writeAutoCnf(datadir, uuid); err != nil {
+		return fmt.Errorf("failed to restore server-uuid via auto.cnf: %w", err)
+	}
+	slog.Info("Restored server-uuid from backup", "uuid", uuid, "path", autoCnfPath)
+	return nil
+}
+
+func RestoreBackup(cfg *Config, backupID string, datadir string, prepareOnly bool, newServerUUID bool) error {
 	// If backupID is empty, find the latest completed backup
 	if backupID == "" {
 		latest, err := GetLatestBackup(cfg.BackupDir)
@@ -250,6 +352,12 @@ func RestoreBackup(cfg *Config, backupID string, datadir string, prepareOnly boo
 	slog.Info("Running command", "command", cfg.BackupBin, "args", args)
 	if err := cmd.Run(); err != nil {
 		return fmt.Errorf("%s --copy-back failed: %w", cfg.BackupBin, err)
+	}
+
+	// Re-establish the backed-up server's UUID before any server is started on
+	// the datadir (the PITR recovery daemon reads it right after this returns).
+	if err := restoreServerUUID(cfg, prepareDir, datadir, newServerUUID); err != nil {
+		return err
 	}
 
 	slog.Info("Restore (copy-back) completed successfully. Please check file permissions and start the MariaDB server.")

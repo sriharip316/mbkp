@@ -12,15 +12,16 @@ import (
 )
 
 var (
-	backupDir   string
-	parentId    string
-	outputFmt   string
-	backupId    string
-	datadir     string
-	prepareOnly bool
-	targetTime  string
-	retention   string
-	dryRun      bool
+	backupDir     string
+	parentId      string
+	outputFmt     string
+	backupId      string
+	datadir       string
+	prepareOnly   bool
+	newServerUUID bool
+	targetTime    string
+	retention     string
+	dryRun        bool
 )
 
 // version is injected at build time using:
@@ -144,7 +145,7 @@ var restoreCmd = &cobra.Command{
 			_ = cmd.Usage()
 			os.Exit(1)
 		}
-		if err := mbkp.RestoreBackup(cfg, backupId, datadir, prepareOnly); err != nil {
+		if err := mbkp.RestoreBackup(cfg, backupId, datadir, prepareOnly, newServerUUID); err != nil {
 			slog.Error("Restore failed", "error", err)
 			os.Exit(1)
 		}
@@ -175,7 +176,7 @@ var pitrCmd = &cobra.Command{
 			slog.Error("Error parsing target-time, must be in RFC3339 format (e.g. 2006-01-02T15:04:05Z or 2006-01-02T15:04:05+05:30) or 'YYYY-MM-DD HH:MM:SS' (interpreted in the local timezone)", "target_time", targetTime)
 			os.Exit(1)
 		}
-		if err := mbkp.RunPITR(cfg, parsedTime, datadir); err != nil {
+		if err := mbkp.RunPITR(cfg, parsedTime, datadir, newServerUUID); err != nil {
 			slog.Error("PITR failed", "error", err)
 			os.Exit(1)
 		}
@@ -232,10 +233,12 @@ func init() {
 	restoreCmd.Flags().StringVar(&backupId, "backup-id", "", "Backup ID to restore (default: latest completed backup)")
 	restoreCmd.Flags().StringVar(&datadir, "datadir", "", "Target MariaDB data directory")
 	restoreCmd.Flags().BoolVar(&prepareOnly, "prepare-only", false, "Prepare the backup in place but do not copy-back")
+	restoreCmd.Flags().BoolVar(&newServerUUID, "new-server-uuid", false, "Start the restored server with a freshly generated server-uuid instead of the one recorded in the backup (MySQL/Percona only; use when the restored server will run alongside the original, e.g. clones)")
 
 	// PITR flags
 	pitrCmd.Flags().StringVar(&targetTime, "target-time", "", "Target timestamp for recovery (RFC3339 format, e.g. '2026-06-09T14:30:00Z'; zoneless 'YYYY-MM-DD HH:MM:SS' is interpreted in the local timezone)")
 	pitrCmd.Flags().StringVar(&datadir, "datadir", "", "Target MariaDB data directory")
+	pitrCmd.Flags().BoolVar(&newServerUUID, "new-server-uuid", false, "Recover with a freshly generated server-uuid instead of the one recorded in the backup (MySQL/Percona only; use when the recovered server will run alongside the original, e.g. clones)")
 
 	// Purge flags
 	purgeCmd.Flags().StringVar(&retention, "retention", "", "Retention policy duration (e.g. '7d', '30d', '24h')")

@@ -66,7 +66,7 @@ func getBinlogFilesToApply(binlogsDir string, startFile string) ([]string, error
 	return filtered, nil
 }
 
-func RunPITR(cfg *Config, targetTime time.Time, datadir string) error {
+func RunPITR(cfg *Config, targetTime time.Time, datadir string, newServerUUID bool) error {
 	slog.Info("Starting PITR recovery", "target_time", targetTime.Format(time.RFC3339))
 
 	// 1. Find the latest completed backup before the target time
@@ -96,8 +96,11 @@ func RunPITR(cfg *Config, targetTime time.Time, datadir string) error {
 
 	// 2. Restore the selected backup
 	slog.Info("Restoring backup", "id", baseBackup.ID)
-	// We restore it directly to the datadir (prepare + copy-back)
-	if err := RestoreBackup(cfg, baseBackup.ID, datadir, false); err != nil {
+	// We restore it directly to the datadir (prepare + copy-back). The restore
+	// also re-establishes the backed-up server-uuid via auto.cnf (unless
+	// newServerUUID is set), so the recovery daemon — and any server started
+	// on this datadir afterwards — continues the original GTID identity.
+	if err := RestoreBackup(cfg, baseBackup.ID, datadir, false, newServerUUID); err != nil {
 		return fmt.Errorf("failed to restore base backup for PITR: %w", err)
 	}
 
