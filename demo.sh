@@ -110,10 +110,11 @@ function install_xtrabackup {
     podman exec --user root "${CONTAINER}" curl -sSL -o /tmp/libev.rpm "${libev_url}"
     podman exec --user root "${CONTAINER}" rpm -i /tmp/libev.rpm || true
     podman exec --user root "${CONTAINER}" percona-release enable-only tools release
-    # perl-English is required by xtrabackup; perl-Sys-Hostname silences a
-    # "Can't locate Sys/Hostname.pm" error xtrabackup prints on every run with
-    # the minimal UBI perl.
-    podman exec --user root "${CONTAINER}" microdnf install -y percona-xtrabackup-84 perl-English perl-Sys-Hostname
+    # perl-core provides the core modules (English, Sys::Hostname, FindBin, …)
+    # that xtrabackup's embedded perl scripts expect but the minimal UBI perl
+    # does not ship; without it xtrabackup prints "Can't locate …" errors on
+    # every run.
+    podman exec --user root "${CONTAINER}" microdnf install -y percona-xtrabackup-84 perl-core
 }
 
 function db_exec {

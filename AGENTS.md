@@ -147,7 +147,7 @@ A comprehensive demo script (`demo.sh`) is available to validate all functionali
 ```
 
 > [!NOTE]
-> The `--mysql` flavor uses Percona Server 8.4 LTS rather than the newer 9.7 LTS because Percona XtraBackup 9.7 is not GA yet and `mbkp` requires `xtrabackup` for MySQL-family servers. At container creation it installs `percona-xtrabackup-84` (via `percona-release` + `microdnf`, plus a libev RPM from Rocky Linux 9 — the same steps as `installXtrabackup` in `cmd/mbkp/e2e_test.go`) and starts the server with `--gtid-mode=ON --enforce-gtid-consistency=ON`, which is mandatory for GTID-based PITR. The `--mariadb` flavor keeps GTID-free MariaDB defaults. The `--mysql` flavor additionally requires network access inside the container to download the RPM packages.
+> The `--mysql` flavor uses Percona Server 8.4 LTS rather than the newer 9.7 LTS because Percona XtraBackup 9.7 is not GA yet and `mbkp` requires `xtrabackup` for MySQL-family servers. At container creation it installs `percona-xtrabackup-84` (via `percona-release` + `microdnf`, plus a libev RPM from Rocky Linux 9 — the same steps as `installXtrabackup` in `cmd/mbkp/e2e_test.go` — and `perl-core` for the core perl modules xtrabackup's embedded scripts expect on the minimal UBI base) and starts the server with `--gtid-mode=ON --enforce-gtid-consistency=ON`, which is mandatory for GTID-based PITR. The `--mariadb` flavor keeps GTID-free MariaDB defaults. The `--mysql` flavor additionally requires network access inside the container to download the RPM packages.
 
 **Demo Workflow**:
 1. **Container Setup**: Creates a Podman container running MariaDB 10.11 (`--mariadb`) or Percona Server for MySQL 8.4 LTS (`--mysql`) with binary logging enabled (and GTID mode on for MySQL).
