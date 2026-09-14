@@ -189,7 +189,6 @@ func TestE2EBackupRestoreAndPITR(t *testing.T) {
 	}
 
 	for _, v := range variantsToRun {
-		v := v // capture for parallel closure
 		t.Run(v.Version, func(t *testing.T) {
 			if !sequential {
 				t.Parallel()

@@ -61,16 +61,16 @@ func TestMetadataOperations(t *testing.T) {
 		t.Errorf("expected start time %v, got %v", b1.StartTime, b.StartTime)
 	}
 
-	// 3. Complete the full backup (test upsert)
+	// 3. Complete the full backup (test the in_progress → completed update)
 	endTime := time.Now().Add(-9 * time.Minute).Truncate(time.Microsecond)
 	b1.Status = "completed"
 	b1.EndTime = endTime
 	b1.BinlogFile = "mysql-bin.000001"
 	b1.Gtid = "0-1-5"
 
-	err = AddBackup(tmpDir, b1)
+	err = UpdateBackup(tmpDir, b1)
 	if err != nil {
-		t.Fatalf("AddBackup failed on upsert: %v", err)
+		t.Fatalf("UpdateBackup failed: %v", err)
 	}
 
 	// Now it should be the latest backup
@@ -209,13 +209,13 @@ func TestCheckpointsRoundTrip(t *testing.T) {
 		t.Errorf("expected checkpoints %q, got %q", checkpoints, got.Checkpoints)
 	}
 
-	// Upsert must update checkpoints along with the completion fields.
+	// Update must set checkpoints along with the completion fields.
 	updated := checkpoints + "flushed_lsn = 12345679\n"
 	b.Status = "completed"
 	b.EndTime = time.Now()
 	b.Checkpoints = updated
-	if err := AddBackup(tmpDir, b); err != nil {
-		t.Fatalf("AddBackup upsert failed: %v", err)
+	if err := UpdateBackup(tmpDir, b); err != nil {
+		t.Fatalf("UpdateBackup failed: %v", err)
 	}
 	got, err = GetBackupByID(tmpDir, "full-cp")
 	if err != nil {
@@ -223,5 +223,42 @@ func TestCheckpointsRoundTrip(t *testing.T) {
 	}
 	if got.Checkpoints != updated {
 		t.Errorf("expected updated checkpoints %q, got %q", updated, got.Checkpoints)
+	}
+}
+
+func TestStrictInsertAndUpdate(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	b := BackupMetadata{
+		ID:        "full-dup",
+		Type:      "full",
+		Status:    "in_progress",
+		StartTime: time.Now(),
+		Path:      "full-dup.xbstream.gz",
+	}
+	if err := AddBackup(tmpDir, b); err != nil {
+		t.Fatalf("AddBackup failed: %v", err)
+	}
+
+	// Inserting the same ID again must fail loudly: a shared ID means two runs
+	// would silently merge their metadata (the W2 corruption mode).
+	b.Status = "completed"
+	if err := AddBackup(tmpDir, b); err == nil {
+		t.Error("expected duplicate-ID insert to fail, got nil")
+	}
+
+	// The failed re-insert must not have modified the original row.
+	got, err := GetBackupByID(tmpDir, "full-dup")
+	if err != nil {
+		t.Fatalf("GetBackupByID failed: %v", err)
+	}
+	if got.Status != "in_progress" {
+		t.Errorf("original row must be untouched by the failed insert, got status %s", got.Status)
+	}
+
+	// Updating a row that does not exist is an error, not a silent no-op.
+	missing := BackupMetadata{ID: "no-such-backup", Status: "completed", EndTime: time.Now()}
+	if err := UpdateBackup(tmpDir, missing); err == nil {
+		t.Error("expected UpdateBackup on missing row to fail, got nil")
 	}
 }

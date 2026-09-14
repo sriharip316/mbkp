@@ -76,6 +76,12 @@ var backupFullCmd = &cobra.Command{
 			slog.Error("Configuration error", "error", err)
 			os.Exit(1)
 		}
+		release, err := mbkp.AcquireLock(cfg.BackupDir)
+		if err != nil {
+			slog.Error("Cannot start full backup", "error", err)
+			os.Exit(1)
+		}
+		defer func() { _ = release() }()
 		if err := mbkp.RunFullBackup(cfg); err != nil {
 			slog.Error("Full backup failed", "error", err)
 			os.Exit(1)
@@ -92,6 +98,12 @@ var backupIncrementalCmd = &cobra.Command{
 			slog.Error("Configuration error", "error", err)
 			os.Exit(1)
 		}
+		release, err := mbkp.AcquireLock(cfg.BackupDir)
+		if err != nil {
+			slog.Error("Cannot start incremental backup", "error", err)
+			os.Exit(1)
+		}
+		defer func() { _ = release() }()
 		if err := mbkp.RunIncrementalBackup(cfg, parentId); err != nil {
 			slog.Error("Incremental backup failed", "error", err)
 			os.Exit(1)
@@ -108,6 +120,12 @@ var backupBinlogCmd = &cobra.Command{
 			slog.Error("Configuration error", "error", err)
 			os.Exit(1)
 		}
+		release, err := mbkp.AcquireLock(cfg.BackupDir)
+		if err != nil {
+			slog.Error("Cannot start binlog archiving", "error", err)
+			os.Exit(1)
+		}
+		defer func() { _ = release() }()
 		if err := mbkp.BackupBinlogs(cfg); err != nil {
 			slog.Error("Binlog archiving failed", "error", err)
 			os.Exit(1)
@@ -145,6 +163,12 @@ var restoreCmd = &cobra.Command{
 			_ = cmd.Usage()
 			os.Exit(1)
 		}
+		release, err := mbkp.AcquireLock(cfg.BackupDir)
+		if err != nil {
+			slog.Error("Cannot start restore", "error", err)
+			os.Exit(1)
+		}
+		defer func() { _ = release() }()
 		if err := mbkp.RestoreBackup(cfg, backupId, datadir, prepareOnly, newServerUUID); err != nil {
 			slog.Error("Restore failed", "error", err)
 			os.Exit(1)
@@ -173,9 +197,15 @@ var pitrCmd = &cobra.Command{
 		}
 		parsedTime, err := parseTargetTime(targetTime)
 		if err != nil {
-			slog.Error("Error parsing target-time, must be in RFC3339 format (e.g. 2006-01-02T15:04:05Z or 2006-01-02T15:04:05+05:30) or 'YYYY-MM-DD HH:MM:SS' (interpreted in the local timezone)", "target_time", targetTime)
+			slog.Error("Error parsing target-time, must be in RFC3339 format (e.g. 2006-01-02T15:04:05Z or '2006-01-02T15:04:05+05:30') or 'YYYY-MM-DD HH:MM:SS' (interpreted in the local timezone)", "target_time", targetTime)
 			os.Exit(1)
 		}
+		release, err := mbkp.AcquireLock(cfg.BackupDir)
+		if err != nil {
+			slog.Error("Cannot start PITR", "error", err)
+			os.Exit(1)
+		}
+		defer func() { _ = release() }()
 		if err := mbkp.RunPITR(cfg, parsedTime, datadir, newServerUUID); err != nil {
 			slog.Error("PITR failed", "error", err)
 			os.Exit(1)
@@ -207,6 +237,12 @@ var purgeCmd = &cobra.Command{
 			_ = cmd.Usage()
 			os.Exit(1)
 		}
+		release, err := mbkp.AcquireLock(cfg.BackupDir)
+		if err != nil {
+			slog.Error("Cannot start purge", "error", err)
+			os.Exit(1)
+		}
+		defer func() { _ = release() }()
 		if err := mbkp.PurgeBackups(cfg, retention, dryRun); err != nil {
 			slog.Error("Purge failed", "error", err)
 			os.Exit(1)

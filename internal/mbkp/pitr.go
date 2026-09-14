@@ -16,11 +16,11 @@ import (
 // binlogBaseName strips an optional .lz4/.gz compression suffix from a binlog filename.
 // Partial archives (".part") keep their suffix so they are never mistaken for usable binlogs.
 func binlogBaseName(name string) string {
-	if strings.HasSuffix(name, ".lz4") {
-		return strings.TrimSuffix(name, ".lz4")
+	if before, ok := strings.CutSuffix(name, ".lz4"); ok {
+		return before
 	}
-	if strings.HasSuffix(name, ".gz") {
-		return strings.TrimSuffix(name, ".gz")
+	if before, ok := strings.CutSuffix(name, ".gz"); ok {
+		return before
 	}
 	return name
 }
@@ -184,7 +184,7 @@ func RunPITR(cfg *Config, targetTime time.Time, datadir string, newServerUUID bo
 	slog.Info("Checking for database connection (polling up to 2 minutes)...")
 	connected := false
 	var dbErr error
-	for i := 0; i < 24; i++ { // 24 * 5s = 120s
+	for i := range 24 { // 24 * 5s = 120s
 		db, err := cfg.ConnectDB()
 		if err == nil {
 			_ = db.Close()

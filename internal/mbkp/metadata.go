@@ -18,7 +18,7 @@ type BackupMetadata struct {
 	Type        string    `json:"type"`   // "full" or "incremental"
 	Status      string    `json:"status"` // "in_progress", "completed", "failed"
 	StartTime   time.Time `json:"start_time"`
-	EndTime     time.Time `json:"end_time,omitempty"`
+	EndTime     time.Time `json:"end_time"`
 	Path        string    `json:"path"`                  // Relative path to the archive file
 	BinlogFile  string    `json:"binlog_file"`           // Binlog filename at backup end; anchor for binlog retention and PITR archive-completeness checks
 	Gtid        string    `json:"gtid"`                  // GTID set at backup end; the PITR replay boundary
@@ -104,7 +104,11 @@ const selectBackup = `
 	SELECT id, type, status, start_time, end_time, path, binlog_file, gtid, parent_id, checkpoints
 	FROM backups`
 
-// AddBackup inserts a new backup row or updates an existing one (upsert by ID).
+// AddBackup inserts a new backup row. Insertion is strict: a duplicate ID is
+// an error, never a silent overwrite — two runs sharing an ID (one run's row
+// merged with the other's checkpoints/path) is catalog corruption, so it must
+// fail loudly. Use UpdateBackup for the in_progress → completed/failed
+// transition of an already-inserted row.
 func AddBackup(backupDir string, backup BackupMetadata) error {
 	db, err := openDB(backupDir)
 	if err != nil {
@@ -113,7 +117,7 @@ func AddBackup(backupDir string, backup BackupMetadata) error {
 	defer func() { _ = db.Close() }()
 
 	// Store nullable fields as SQL NULL when empty/zero.
-	var endTime, binlogFile, gtid, parentID, checkpoints interface{}
+	var endTime, binlogFile, gtid, parentID, checkpoints any
 	if !backup.EndTime.IsZero() {
 		endTime = backup.EndTime.UTC().Format(time.RFC3339Nano)
 	}
@@ -133,12 +137,6 @@ func AddBackup(backupDir string, backup BackupMetadata) error {
 	_, err = db.Exec(`
 		INSERT INTO backups (id, type, status, start_time, end_time, path, binlog_file, gtid, parent_id, checkpoints)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-		ON CONFLICT(id) DO UPDATE SET
-			status      = excluded.status,
-			end_time    = excluded.end_time,
-			binlog_file = excluded.binlog_file,
-			gtid        = excluded.gtid,
-			checkpoints = excluded.checkpoints
 	`,
 		backup.ID, backup.Type, backup.Status,
 		backup.StartTime.UTC().Format(time.RFC3339Nano),
@@ -150,7 +148,51 @@ func AddBackup(backupDir string, backup BackupMetadata) error {
 		checkpoints,
 	)
 	if err != nil {
-		return fmt.Errorf("failed to upsert backup %s: %w", backup.ID, err)
+		return fmt.Errorf("failed to insert backup %s: %w", backup.ID, err)
+	}
+	return nil
+}
+
+// UpdateBackup updates the mutable fields of an existing backup row — the
+// status, end time, binlog coordinates, and checkpoints captured when a
+// running backup finishes (successfully or not). Identity fields (type, path,
+// parent) are fixed when the row is inserted and are never rewritten here.
+func UpdateBackup(backupDir string, backup BackupMetadata) error {
+	db, err := openDB(backupDir)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = db.Close() }()
+
+	// Store nullable fields as SQL NULL when empty/zero.
+	var endTime, binlogFile, gtid, checkpoints any
+	if !backup.EndTime.IsZero() {
+		endTime = backup.EndTime.UTC().Format(time.RFC3339Nano)
+	}
+	if backup.BinlogFile != "" {
+		binlogFile = backup.BinlogFile
+	}
+	if backup.Gtid != "" {
+		gtid = backup.Gtid
+	}
+	if backup.Checkpoints != "" {
+		checkpoints = backup.Checkpoints
+	}
+
+	res, err := db.Exec(`
+		UPDATE backups
+		SET status = ?, end_time = ?, binlog_file = ?, gtid = ?, checkpoints = ?
+		WHERE id = ?
+	`,
+		backup.Status, endTime, binlogFile, gtid, checkpoints, backup.ID,
+	)
+	if err != nil {
+		return fmt.Errorf("failed to update backup %s: %w", backup.ID, err)
+	}
+	if n, err := res.RowsAffected(); err != nil {
+		return fmt.Errorf("failed to confirm update of backup %s: %w", backup.ID, err)
+	} else if n == 0 {
+		return fmt.Errorf("cannot update backup %s: not found in catalog", backup.ID)
 	}
 	return nil
 }

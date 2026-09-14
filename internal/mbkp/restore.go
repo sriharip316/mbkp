@@ -224,7 +224,7 @@ func readServerUUID(prepareDir string) string {
 		slog.Warn("failed to read backup-my.cnf; the restored server will generate a fresh UUID", "path", path, "error", err)
 		return ""
 	}
-	for _, line := range strings.Split(string(data), "\n") {
+	for line := range strings.SplitSeq(string(data), "\n") {
 		name, value, found := strings.Cut(strings.TrimSpace(line), "=")
 		if !found {
 			continue

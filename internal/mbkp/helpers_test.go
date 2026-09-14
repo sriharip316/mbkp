@@ -4,6 +4,8 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"regexp"
+	"strings"
 	"testing"
 )
 
@@ -500,5 +502,30 @@ func TestDetectCompressor(t *testing.T) {
 	c := detectCompressor()
 	if c.Name != "lz4" && c.Name != "gzip" {
 		t.Errorf("expected compressor name to be lz4 or gzip, got %s", c.Name)
+	}
+}
+
+func TestNewBackupID(t *testing.T) {
+	idRe := regexp.MustCompile(`^(full|inc)_\d{8}_\d{6}_\d{3}$`)
+
+	for _, prefix := range []string{"full_", "inc_"} {
+		id := newBackupID(prefix)
+		if !idRe.MatchString(id) {
+			t.Errorf("newBackupID(%q) = %q, expected format %sYYYYMMDD_HHMMSS_mmm", prefix, id, prefix)
+		}
+		if !strings.HasPrefix(id, prefix) {
+			t.Errorf("newBackupID(%q) = %q, expected %q prefix", prefix, id, prefix)
+		}
+	}
+
+	// Rapid successive calls must not collide — two runs of the same type can
+	// start within the same second (small databases, scripted loops, retries).
+	seen := make(map[string]bool)
+	for i := range 100 {
+		id := newBackupID("full_")
+		if seen[id] {
+			t.Fatalf("newBackupID produced duplicate ID %q after %d calls", id, i)
+		}
+		seen[id] = true
 	}
 }

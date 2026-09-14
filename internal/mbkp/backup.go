@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -242,11 +243,11 @@ func parseMariaDBBackupInfoContent(content string) (string, string, error) {
 		if !strings.HasPrefix(line, "binlog_pos") {
 			continue
 		}
-		eqIdx := strings.Index(line, "=")
-		if eqIdx < 0 {
+		_, after, ok0 := strings.Cut(line, "=")
+		if !ok0 {
 			continue
 		}
-		value := strings.TrimSpace(line[eqIdx+1:])
+		value := strings.TrimSpace(after)
 		// Extract filename from first single-quoted token
 		fn, rest, ok := extractSingleQuoted(value)
 		if !ok {
@@ -308,6 +309,35 @@ func captureLsnInfo(lsnDir string) (checkpoints, binlogFile, gtid string) {
 			"(MySQL/Percona servers must run with --gtid-mode=ON --enforce-gtid-consistency=ON)")
 	}
 	return checkpoints, binlogFile, gtid
+}
+
+// backupID state for newBackupID: the millisecond reading of the last issued
+// ID, kept strictly monotonic so rapid successive calls within one process
+// (or a backwards clock step) can never repeat an ID.
+var (
+	lastIDMilliMu sync.Mutex
+	lastIDMilli   int64
+)
+
+// newBackupID returns a backup identifier of the form
+// <prefix>YYYYMMDD_HHMMSS_mmm (e.g. full_20260914_093000_482). The suffix is
+// derived from the millisecond clock and kept strictly monotonic within the
+// process, so IDs never repeat even when two calls land in the same
+// millisecond (small databases, scripted loops, retries) or the clock steps
+// backwards. Across processes, the per-directory lock serializes runs and
+// insert-only catalog writes turn any residual duplicate into a loud error.
+func newBackupID(prefix string) string {
+	t := time.Now()
+	ms := t.UnixMilli()
+
+	lastIDMilliMu.Lock()
+	if ms <= lastIDMilli {
+		ms = lastIDMilli + 1
+	}
+	lastIDMilli = ms
+	lastIDMilliMu.Unlock()
+
+	return fmt.Sprintf("%s%s_%03d", prefix, t.Format("20060102_150405"), ms%1000)
 }
 
 // streamBackup runs: <backupBin> <mariabackupArgs> | <comp> <compressArgs> > <archive>
@@ -387,8 +417,7 @@ func streamBackup(cfg *Config, archive string, comp Compressor, mariabackupArgs 
 func RunFullBackup(cfg *Config) error {
 	comp := detectCompressor()
 
-	timestamp := time.Now().Format("20060102_150405")
-	backupID := "full_" + timestamp
+	backupID := newBackupID("full_")
 	archive := archivePath(cfg.BackupDir, backupID, comp)
 	// Per-run temp dir receiving the --extra-lsndir output (checkpoints and
 	// binlog info); its content is persisted in the catalog before cleanup.
@@ -411,7 +440,7 @@ func RunFullBackup(cfg *Config) error {
 		Path:      backupID + comp.Ext,
 	}
 	if err := AddBackup(cfg.BackupDir, meta); err != nil {
-		return fmt.Errorf("failed to update metadata to in_progress: %w", err)
+		return fmt.Errorf("failed to record in_progress metadata: %w", err)
 	}
 
 	targetDir := filepath.Join(cfg.BackupDir, "target_tmp_"+backupID)
@@ -433,7 +462,7 @@ func RunFullBackup(cfg *Config) error {
 	if err := streamBackup(cfg, archive, comp, args); err != nil {
 		meta.Status = "failed"
 		meta.EndTime = time.Now()
-		_ = AddBackup(cfg.BackupDir, meta)
+		_ = UpdateBackup(cfg.BackupDir, meta)
 		return err
 	}
 
@@ -445,7 +474,7 @@ func RunFullBackup(cfg *Config) error {
 	meta.Gtid = gtid
 	meta.Checkpoints = checkpoints
 
-	if err := AddBackup(cfg.BackupDir, meta); err != nil {
+	if err := UpdateBackup(cfg.BackupDir, meta); err != nil {
 		return fmt.Errorf("failed to finalize backup metadata: %w", err)
 	}
 
@@ -486,8 +515,7 @@ func RunIncrementalBackup(cfg *Config, parentID string) error {
 
 	comp := detectCompressor()
 
-	timestamp := time.Now().Format("20060102_150405")
-	backupID := "inc_" + timestamp
+	backupID := newBackupID("inc_")
 	archive := archivePath(cfg.BackupDir, backupID, comp)
 	// Per-run temp dir receiving the --extra-lsndir output (checkpoints and
 	// binlog info); its content is persisted in the catalog before cleanup.
@@ -512,7 +540,7 @@ func RunIncrementalBackup(cfg *Config, parentID string) error {
 		ParentID:  parentBackup.ID,
 	}
 	if err := AddBackup(cfg.BackupDir, meta); err != nil {
-		return fmt.Errorf("failed to update metadata to in_progress: %w", err)
+		return fmt.Errorf("failed to record in_progress metadata: %w", err)
 	}
 
 	targetDir := filepath.Join(cfg.BackupDir, "target_tmp_"+backupID)
@@ -551,7 +579,7 @@ func RunIncrementalBackup(cfg *Config, parentID string) error {
 	if err := streamBackup(cfg, archive, comp, args); err != nil {
 		meta.Status = "failed"
 		meta.EndTime = time.Now()
-		_ = AddBackup(cfg.BackupDir, meta)
+		_ = UpdateBackup(cfg.BackupDir, meta)
 		return err
 	}
 
@@ -563,7 +591,7 @@ func RunIncrementalBackup(cfg *Config, parentID string) error {
 	meta.Gtid = gtid
 	meta.Checkpoints = checkpoints
 
-	if err := AddBackup(cfg.BackupDir, meta); err != nil {
+	if err := UpdateBackup(cfg.BackupDir, meta); err != nil {
 		return fmt.Errorf("failed to finalize backup metadata: %w", err)
 	}
 

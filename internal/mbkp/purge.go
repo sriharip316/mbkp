@@ -199,10 +199,10 @@ func PurgeBackups(cfg *Config, retentionStr string, dryRun bool) error {
 		shouldDelete := false
 
 		binlogNameWithoutExt := name
-		if strings.HasSuffix(binlogNameWithoutExt, ".lz4") {
-			binlogNameWithoutExt = strings.TrimSuffix(binlogNameWithoutExt, ".lz4")
-		} else if strings.HasSuffix(binlogNameWithoutExt, ".gz") {
-			binlogNameWithoutExt = strings.TrimSuffix(binlogNameWithoutExt, ".gz")
+		if before, ok := strings.CutSuffix(binlogNameWithoutExt, ".lz4"); ok {
+			binlogNameWithoutExt = before
+		} else if before, ok := strings.CutSuffix(binlogNameWithoutExt, ".gz"); ok {
+			binlogNameWithoutExt = before
 		}
 
 		if oldestKeptBackup != nil && oldestKeptBackup.BinlogFile != "" {

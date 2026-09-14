@@ -18,7 +18,8 @@ The repository is structured as a standard Go CLI utility:
     *   **[pitr.go](internal/mbkp/pitr.go)**: Manages Point-in-Time Recovery ([`RunPITR`](internal/mbkp/pitr.go#L54-L174)) by restoring the closest preceding physical backup and applying archived binlogs via `mariadb-binlog` and `mariadb`.
     *   **[binlog.go](internal/mbkp/binlog.go)**: Connection handling to flush active logs and archive closed binary logs on the local disk ([`BackupBinlogs`](internal/mbkp/binlog.go#L13-L107)).
     *   **[purge.go](internal/mbkp/purge.go)**: Implements dependency-aware expiration analysis, missing archive cleanup, and physical and metadata purging for full, incremental, and binlog backups ([`PurgeBackups`](internal/mbkp/purge.go#L74-L232)).
-    *   **[metadata.go](internal/mbkp/metadata.go)**: Controls catalog persistence inside a local SQLite database (`backups.db`).
+    *   **[metadata.go](internal/mbkp/metadata.go)**: Controls catalog persistence inside a local SQLite database (`backups.db`): `AddBackup` inserts rows strictly (a duplicate ID is a loud error, never a silent overwrite) and `UpdateBackup` performs the `in_progress` → `completed`/`failed` transition.
+    *   **[lock.go](internal/mbkp/lock.go)**: Cross-process serialization via an exclusive non-blocking `flock` on `<backup-dir>/.mbkp.lock` ([`AcquireLock`](internal/mbkp/lock.go)), taken by every mutating command so two `mbkp` processes never mutate one backup directory concurrently.
     *   **[list.go](internal/mbkp/list.go)**: Pretty-prints or exports backup metadata as JSON.
 
 ---
@@ -69,17 +70,20 @@ The system automatically detects and selects compression tools:
 ### 1. Backup Workflow
 ```mermaid
 graph TD
-    A[Start Backup Request] --> B{Detect Compression Tool}
+    A[Start Backup Request] --> A2[Acquire exclusive flock on backup dir]
+    A2 --> B{Detect Compression Tool}
     B -->|lz4 installed| C[Set compressor to LZ4]
     B -->|lz4 missing| D[Set compressor to GZIP]
-    C & D --> E[Write 'in_progress' record to SQLite metadata]
+    C & D --> E[Generate unique backup ID; write 'in_progress' record to SQLite metadata]
     E --> F[Run: mariabackup --backup --stream=xbstream]
     F --> G[Pipe output to compression tool]
     G --> H[Write compressed archive to disk]
     H --> I[Capture checkpoints & binlog info from the --extra-lsndir output; parse the binlog filename & GTID set from the captured content]
-    I --> J[Finalize metadata: set completed status, binlog filename, GTID set, checkpoints & end time]
+    I --> J[Finalize metadata via UpdateBackup: set completed status, binlog filename, GTID set, checkpoints & end time]
 ```
 > [!NOTE]
+> *   **Serialization**: Every mutating command (`backup full|incremental|binlog`, `restore`, `pitr`, `purge` — including `--dry-run`) takes an exclusive, non-blocking `flock` on `<backup-dir>/.mbkp.lock` for its whole run; a colliding invocation fails fast with the holder's PID instead of queueing. The lock is kernel-managed (released on process exit, so a killed run leaves no stale lock) and acquired only at the CLI entry points in `cmd/mbkp/main.go`. `list` runs lock-free (WAL readers are safe). Locks are per backup directory — independent directories never block each other.
+> *   **Backup IDs** carry a millisecond suffix kept strictly monotonic within the process (`full_20260914_093000_482`, from `newBackupID`), so two runs of the same type starting within one second (small databases, scripted loops, immediate retries) never share an ID; combined with insert-only catalog writes, two runs can never silently merge their metadata rows.
 > *   **Incremental Backups** base on the *chosen parent's* checkpoints, which are stored per-backup in the SQLite catalog (`checkpoints` column, raw `xtrabackup_checkpoints`/`mariadb_backup_checkpoints` file content captured via `--extra-lsndir` into a per-run temp dir `<backup-dir>/lsn_tmp_<id>` that is removed afterwards).
 > *   The binlog filename and GTID set are parsed from the same `--extra-lsndir` output (the `binlog_pos = filename '…', position '…', GTID of the last change '…'` line of `xtrabackup_info`/`mariadb_backup_info`) and stored in the `binlog_file`/`gtid` columns — the backup archive is never decompressed or extracted just to read the info files. A backup with an empty GTID set (server running without GTIDs) warns at backup time; PITR refuses such backups.
 > *   `--incremental-basedir` points at a temp dir (`<backup-dir>/incbase_tmp_<id>`) materialized from the parent's stored checkpoints (written under both tool-specific filenames), so the delta always matches the recorded `parent_id` — never whatever backup happened to run last.
@@ -193,6 +197,8 @@ These tests use Podman/Docker to orchestrate isolated MariaDB containers and val
 > Keep the following constraints in mind when editing or creating code:
 > *   **Documentation Integrity**: Do not remove any existing documentation, comments, or docstrings unless explicitly asked.
 > *   **Documentation Sync**: Whenever you add, remove, or modify CLI commands, database schemas, configuration fields, or core workflows, you MUST update this `AGENTS.md` file to keep it fully accurate and in sync with the codebase.
+> *   **Cross-Process Serialization**: Mutating commands must hold the exclusive `flock` on `<backup-dir>/.mbkp.lock` (`AcquireLock` in `internal/mbkp/lock.go`) for their entire run. Acquire it only at the CLI entry points in `cmd/mbkp/main.go`, never inside `internal/mbkp` functions — internal calls such as `RunPITR` → `RestoreBackup` run in one process and would self-deadlock on a second file description. The lock file is created once and never unlinked. `list` stays lock-free.
+> *   **Strict Catalog Inserts**: `AddBackup` is insert-only — never reintroduce an upsert-by-ID: two runs sharing an ID must fail loudly (PRIMARY KEY violation), never silently merge rows. The `in_progress` → `completed`/`failed` transition goes through `UpdateBackup`, which only touches status/end_time/binlog_file/gtid/checkpoints.
 > *   **Backward Compatibility**: Ensure that schema alterations to the SQLite table `backups` are backward compatible. Handle missing columns or fallback defaults carefully.
 > *   **Empty Directory Check**: Before running `mariabackup --copy-back`, always check if the target data directory exists and is empty (excluding `.` and `..`). Do not write backups over existing operational databases.
 > *   **Resource Leak Cleanup**: When extracting compressed archives for recovery (`RestoreBackup` or `RunPITR`), ensure all temporary extraction folders are properly cleaned up via `defer os.RemoveAll(...)` even when steps fail.
