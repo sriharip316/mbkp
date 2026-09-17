@@ -50,30 +50,9 @@ func BackupBinlogs(cfg *Config) error {
 	}
 	defer func() { _ = rows.Close() }()
 
-	type binlogFileInfo struct {
-		LogName string
-		Size    int64
-	}
-	var binlogs []binlogFileInfo
-	for rows.Next() {
-		var name string
-		var size int64
-		// In some MariaDB versions, SHOW BINARY LOGS has columns: Log_name, File_size, Encrypted
-		// We scan the first two columns which are always Log_name and File_size
-		var encrypted sql.RawBytes // optional column
-		columns, err := rows.Columns()
-		if err != nil {
-			return err
-		}
-		if len(columns) >= 3 {
-			err = rows.Scan(&name, &size, &encrypted)
-		} else {
-			err = rows.Scan(&name, &size)
-		}
-		if err != nil {
-			return fmt.Errorf("failed to scan binary log row: %w", err)
-		}
-		binlogs = append(binlogs, binlogFileInfo{LogName: name, Size: size})
+	binlogs, err := scanBinaryLogs(rows)
+	if err != nil {
+		return err
 	}
 
 	if len(binlogs) > 0 {
@@ -124,6 +103,44 @@ func BackupBinlogs(cfg *Config) error {
 
 	slog.Info("Binlog archiving completed successfully.")
 	return nil
+}
+
+type binlogFileInfo struct {
+	LogName string
+	Size    int64
+}
+
+// scanBinaryLogs reads rows from SHOW BINARY LOGS, handles both 2-column
+// (Log_name, File_size) and 3-column (Log_name, File_size, Encrypted) formats,
+// and checks rows.Err() so iteration failures (e.g. dropped network connection)
+// fail fast rather than silently proceeding with a truncated list of binlogs.
+func scanBinaryLogs(rows *sql.Rows) ([]binlogFileInfo, error) {
+	columns, err := rows.Columns()
+	if err != nil {
+		return nil, fmt.Errorf("failed to get binary log columns: %w", err)
+	}
+
+	var binlogs []binlogFileInfo
+	for rows.Next() {
+		var name string
+		var size int64
+		// In some MariaDB versions, SHOW BINARY LOGS has columns: Log_name, File_size, Encrypted
+		// We scan the first two columns which are always Log_name and File_size
+		var encrypted sql.RawBytes // optional column
+		if len(columns) >= 3 {
+			err = rows.Scan(&name, &size, &encrypted)
+		} else {
+			err = rows.Scan(&name, &size)
+		}
+		if err != nil {
+			return nil, fmt.Errorf("failed to scan binary log row: %w", err)
+		}
+		binlogs = append(binlogs, binlogFileInfo{LogName: name, Size: size})
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("error iterating binary log rows: %w", err)
+	}
+	return binlogs, nil
 }
 
 func compressAndCopyFile(src, dst string, comp Compressor) error {

@@ -1,6 +1,7 @@
 package mbkp
 
 import (
+	"strings"
 	"testing"
 	"time"
 )
@@ -379,5 +380,80 @@ func TestLegacyRFC3339NanoTimestampParsing(t *testing.T) {
 	}
 	if !b.EndTime.Equal(wantEnd) {
 		t.Errorf("EndTime = %v, want %v", b.EndTime, wantEnd)
+	}
+}
+
+func TestScanBackupTimestampParseErrors(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	db, err := openDB(tmpDir)
+	if err != nil {
+		t.Fatalf("openDB failed: %v", err)
+	}
+	defer func() { _ = db.Close() }()
+
+	// 1. Invalid start_time should fail with an error naming the column, invalid value, and backup ID
+	_, err = db.Exec(`
+		INSERT INTO backups (id, type, status, start_time, end_time, path)
+		VALUES ('bad-start-1', 'full', 'completed', 'corrupted-timestamp', NULL, 'bad-start-1.xbstream.gz')
+	`)
+	if err != nil {
+		t.Fatalf("insert bad-start-1 failed: %v", err)
+	}
+
+	_, err = GetBackupByID(tmpDir, "bad-start-1")
+	if err == nil {
+		t.Fatal("expected error for invalid start_time, got nil")
+	}
+	if !strings.Contains(err.Error(), "failed to parse start_time") ||
+		!strings.Contains(err.Error(), "corrupted-timestamp") ||
+		!strings.Contains(err.Error(), "bad-start-1") {
+		t.Errorf("unexpected error message: %v", err)
+	}
+
+	// LoadMetadata should also fail on bad start_time
+	_, err = LoadMetadata(tmpDir)
+	if err == nil {
+		t.Fatal("expected LoadMetadata to fail on invalid start_time, got nil")
+	}
+
+	// 2. Invalid end_time should fail with an error naming the column, invalid value, and backup ID
+	_, err = db.Exec(`
+		INSERT INTO backups (id, type, status, start_time, end_time, path)
+		VALUES ('bad-end-1', 'full', 'completed', '2026-09-17T12:00:00Z', 'corrupted-end-time', 'bad-end-1.xbstream.gz')
+	`)
+	if err != nil {
+		t.Fatalf("insert bad-end-1 failed: %v", err)
+	}
+
+	_, err = GetBackupByID(tmpDir, "bad-end-1")
+	if err == nil {
+		t.Fatal("expected error for invalid end_time, got nil")
+	}
+	if !strings.Contains(err.Error(), "failed to parse end_time") ||
+		!strings.Contains(err.Error(), "corrupted-end-time") ||
+		!strings.Contains(err.Error(), "bad-end-1") {
+		t.Errorf("unexpected error message: %v", err)
+	}
+
+	// 3. NULL end_time should succeed and leave EndTime as zero value
+	_, err = db.Exec(`
+		INSERT INTO backups (id, type, status, start_time, end_time, path)
+		VALUES ('valid-null-end', 'full', 'in_progress', '2026-09-17T12:00:00Z', NULL, 'valid.xbstream.gz')
+	`)
+	if err != nil {
+		t.Fatalf("insert valid-null-end failed: %v", err)
+	}
+
+	b, err := GetBackupByID(tmpDir, "valid-null-end")
+	if err != nil {
+		t.Fatalf("GetBackupByID for valid-null-end failed: %v", err)
+	}
+	if !b.EndTime.IsZero() {
+		t.Errorf("expected zero EndTime for NULL end_time, got %v", b.EndTime)
+	}
+	wantStart := time.Date(2026, 9, 17, 12, 0, 0, 0, time.UTC)
+	if !b.StartTime.Equal(wantStart) {
+		t.Errorf("StartTime = %v, want %v", b.StartTime, wantStart)
 	}
 }

@@ -95,9 +95,16 @@ func scanBackup(rows *sql.Rows) (BackupMetadata, error) {
 		return b, fmt.Errorf("failed to scan backup row: %w", err)
 	}
 
-	b.StartTime, _ = time.Parse(time.RFC3339Nano, startTimeStr)
+	var err error
+	b.StartTime, err = time.Parse(time.RFC3339Nano, startTimeStr)
+	if err != nil {
+		return b, fmt.Errorf("failed to parse start_time %q for backup %s: %w", startTimeStr, b.ID, err)
+	}
 	if endTimeStr.Valid {
-		b.EndTime, _ = time.Parse(time.RFC3339Nano, endTimeStr.String)
+		b.EndTime, err = time.Parse(time.RFC3339Nano, endTimeStr.String)
+		if err != nil {
+			return b, fmt.Errorf("failed to parse end_time %q for backup %s: %w", endTimeStr.String, b.ID, err)
+		}
 	}
 	b.BinlogFile = binlogFile.String
 	b.Gtid = gtid.String
