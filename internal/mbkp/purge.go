@@ -3,6 +3,7 @@ package mbkp
 import (
 	"fmt"
 	"log/slog"
+	"math"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -26,6 +27,10 @@ func ParseRetentionDuration(s string) (time.Duration, error) {
 		}
 		if val < 0 {
 			return 0, fmt.Errorf("duration cannot be negative: %s", s)
+		}
+		const maxDays = int64(math.MaxInt64 / int64(24*time.Hour))
+		if val > maxDays {
+			return 0, fmt.Errorf("duration %q is out of range (max %d days)", s, maxDays)
 		}
 		return time.Duration(val) * 24 * time.Hour, nil
 	}

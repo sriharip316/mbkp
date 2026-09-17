@@ -123,7 +123,7 @@ Point-in-Time Recovery automates recovery to a precise timestamp. Replay is **GT
 
 ### 4. Backup Purging & Retention Workflow
 The `purge` command enforces the backup retention policy:
-1.  **Parse & Cutoff**: Parse retention duration (e.g. `7d`, `30d`) and compute the cutoff timestamp `now - retention`.
+1.  **Parse & Cutoff**: Parse retention duration (e.g. `7d`, `30d`; day multipliers are guarded against `time.Duration` integer overflow) and compute the cutoff timestamp `now - retention`.
 2.  **External Cleanup**: Scan the metadata catalog. If any archive file is missing from disk, print a warning and delete its metadata record from SQLite.
 3.  **Lineage Protection**: Identify completed backups within the retention window. Trace their restoration lineage chain. Mark all ancestors (parents/grandparents) to be kept so that the active backups remain restorable.
 4.  **Clean Archives & Metadata**: Delete any backup archive files not marked to be kept from the disk and delete their SQLite metadata records.

@@ -3,6 +3,7 @@ package mbkp
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -23,6 +24,12 @@ func TestParseRetentionDuration(t *testing.T) {
 		{"-24h", 0, true},
 		{"abc", 0, true},
 		{"7days", 0, true},
+		{"106751d", 106751 * 24 * time.Hour, false},
+		{"106751D", 106751 * 24 * time.Hour, false},
+		{"106752d", 0, true},
+		{"106752D", 0, true},
+		{"999999999999d", 0, true},
+		{"99999999999999999999999999999999d", 0, true},
 	}
 
 	for _, tt := range tests {
@@ -32,6 +39,28 @@ func TestParseRetentionDuration(t *testing.T) {
 		}
 		if err == nil && actual != tt.expected {
 			t.Errorf("ParseRetentionDuration(%q) = %v, expected %v", tt.input, actual, tt.expected)
+		}
+	}
+}
+
+func TestParseRetentionDuration_DayOverflow(t *testing.T) {
+	overflowInputs := []string{
+		"106752d",
+		"106752D",
+		"999999999999d",
+		"999999999999D",
+	}
+
+	for _, input := range overflowInputs {
+		d, err := ParseRetentionDuration(input)
+		if err == nil {
+			t.Fatalf("ParseRetentionDuration(%q) expected error due to overflow, got nil (duration=%v)", input, d)
+		}
+		if d < 0 {
+			t.Errorf("ParseRetentionDuration(%q) returned negative duration: %v", input, d)
+		}
+		if !strings.Contains(err.Error(), "out of range") || !strings.Contains(err.Error(), "max 106751 days") {
+			t.Errorf("ParseRetentionDuration(%q) error %q does not mention range limit", input, err.Error())
 		}
 	}
 }

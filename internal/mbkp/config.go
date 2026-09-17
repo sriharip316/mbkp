@@ -6,6 +6,7 @@ import (
 	"database/sql"
 	"fmt"
 	"log/slog"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -156,11 +157,15 @@ func getEnv(key, defaultVal string) string {
 
 // GetDSN creates a data source name for the mysql driver
 func (c *Config) GetDSN() (string, error) {
-	var dsn string
+	mc := mysql.NewConfig()
+	mc.User = c.User
+	mc.Passwd = c.Password
 	if c.Socket != "" {
-		dsn = fmt.Sprintf("%s:%s@unix(%s)/", c.User, c.Password, c.Socket)
+		mc.Net = "unix"
+		mc.Addr = c.Socket
 	} else {
-		dsn = fmt.Sprintf("%s:%s@tcp(%s:%d)/", c.User, c.Password, c.Host, c.Port)
+		mc.Net = "tcp"
+		mc.Addr = net.JoinHostPort(c.Host, strconv.Itoa(c.Port))
 	}
 
 	// Setup TLS if specified
@@ -174,7 +179,9 @@ func (c *Config) GetDSN() (string, error) {
 				return "", fmt.Errorf("failed to read TLS CA: %w", err)
 			}
 			caCertPool := x509.NewCertPool()
-			caCertPool.AppendCertsFromPEM(caCert)
+			if !caCertPool.AppendCertsFromPEM(caCert) {
+				return "", fmt.Errorf("no valid certificates parsed from TLS CA file %s", c.TLSCA)
+			}
 			tlsConfig.RootCAs = caCertPool
 		}
 
@@ -193,10 +200,10 @@ func (c *Config) GetDSN() (string, error) {
 			return "", fmt.Errorf("failed to register TLS config: %w", err)
 		}
 
-		dsn += "?tls=" + tlsConfigName
+		mc.TLSConfig = tlsConfigName
 	}
 
-	return dsn, nil
+	return mc.FormatDSN(), nil
 }
 
 // ConnectDB establishes a connection to the database
@@ -228,22 +235,18 @@ func (c *Config) GetCommonArgs() []string {
 	}
 
 	if c.TLSCA != "" || c.TLSCert != "" {
-		args = append(args, "--tls")
+		args = append(args, "--ssl")
 		if c.TLSCA != "" {
-			args = append(args, "--tls-ca="+c.TLSCA)
+			args = append(args, "--ssl-ca="+c.TLSCA)
 		}
 		if c.TLSCert != "" {
-			args = append(args, "--tls-cert="+c.TLSCert)
+			args = append(args, "--ssl-cert="+c.TLSCert)
 		}
 		if c.TLSKey != "" {
-			args = append(args, "--tls-key="+c.TLSKey)
+			args = append(args, "--ssl-key="+c.TLSKey)
 		}
-		if !c.TLSVerify {
-			// standard client options skip-ssl-verify
-			// Note: mariabackup/mariadb support --tls-verify-server-cert or not
-			// We can omit it or pass appropriate flags if needed.
-		} else {
-			args = append(args, "--tls-verify-server-cert")
+		if c.TLSVerify {
+			args = append(args, "--ssl-verify-server-cert")
 		}
 	}
 
