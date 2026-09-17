@@ -12,6 +12,13 @@ import (
 
 const dbFileName = "backups.db"
 
+// tsLayout is the fixed-width ISO8601/RFC3339 UTC timestamp layout used to persist
+// start_time and end_time in SQLite, and for SQL comparison boundaries.
+// Using a fixed 9-digit fractional second ensures that lexicographical comparisons
+// in SQLite (ORDER BY, <, >) match chronological ordering, avoiding RFC3339Nano's
+// trailing-zero stripping bug (e.g. "T12:00:00Z" > "T12:00:00.5Z").
+const tsLayout = "2006-01-02T15:04:05.000000000Z07:00"
+
 // BackupMetadata describes a single backup entry stored in the database.
 type BackupMetadata struct {
 	ID          string    `json:"id"`
@@ -119,7 +126,7 @@ func AddBackup(backupDir string, backup BackupMetadata) error {
 	// Store nullable fields as SQL NULL when empty/zero.
 	var endTime, binlogFile, gtid, parentID, checkpoints any
 	if !backup.EndTime.IsZero() {
-		endTime = backup.EndTime.UTC().Format(time.RFC3339Nano)
+		endTime = backup.EndTime.UTC().Format(tsLayout)
 	}
 	if backup.BinlogFile != "" {
 		binlogFile = backup.BinlogFile
@@ -139,7 +146,7 @@ func AddBackup(backupDir string, backup BackupMetadata) error {
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	`,
 		backup.ID, backup.Type, backup.Status,
-		backup.StartTime.UTC().Format(time.RFC3339Nano),
+		backup.StartTime.UTC().Format(tsLayout),
 		endTime,
 		backup.Path,
 		binlogFile,
@@ -167,7 +174,7 @@ func UpdateBackup(backupDir string, backup BackupMetadata) error {
 	// Store nullable fields as SQL NULL when empty/zero.
 	var endTime, binlogFile, gtid, checkpoints any
 	if !backup.EndTime.IsZero() {
-		endTime = backup.EndTime.UTC().Format(time.RFC3339Nano)
+		endTime = backup.EndTime.UTC().Format(tsLayout)
 	}
 	if backup.BinlogFile != "" {
 		binlogFile = backup.BinlogFile
@@ -338,7 +345,7 @@ func GetBackupsBefore(backupDir string, t time.Time) ([]BackupMetadata, error) {
 	rows, err := db.Query(selectBackup+`
 		WHERE status = 'completed' AND end_time < ?
 		ORDER BY end_time ASC`,
-		t.UTC().Format(time.RFC3339Nano),
+		t.UTC().Format(tsLayout),
 	)
 	if err != nil {
 		return nil, fmt.Errorf("failed to query backups before time: %w", err)

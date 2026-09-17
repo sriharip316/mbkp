@@ -262,3 +262,122 @@ func TestStrictInsertAndUpdate(t *testing.T) {
 		t.Error("expected UpdateBackup on missing row to fail, got nil")
 	}
 }
+
+func TestSameSecondTimestampOrderingAndFiltering(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	// Base time at an exact second boundary (0 nanoseconds)
+	t0 := time.Date(2026, 9, 17, 12, 0, 0, 0, time.UTC)
+	// t1 is half a second later within the same second (500,000,000 nanoseconds)
+	t1 := time.Date(2026, 9, 17, 12, 0, 0, 500_000_000, time.UTC)
+
+	b1 := BackupMetadata{
+		ID:        "backup-exact-sec",
+		Type:      "full",
+		Status:    "in_progress",
+		StartTime: t0.Add(-5 * time.Minute),
+		Path:      "b1.xbstream.gz",
+	}
+	if err := AddBackup(tmpDir, b1); err != nil {
+		t.Fatalf("AddBackup b1 failed: %v", err)
+	}
+	b1.Status = "completed"
+	b1.EndTime = t0
+	if err := UpdateBackup(tmpDir, b1); err != nil {
+		t.Fatalf("UpdateBackup b1 failed: %v", err)
+	}
+
+	b2 := BackupMetadata{
+		ID:        "backup-frac-sec",
+		Type:      "incremental",
+		Status:    "in_progress",
+		StartTime: t1.Add(-1 * time.Minute),
+		Path:      "b2.xbstream.gz",
+		ParentID:  "backup-exact-sec",
+	}
+	if err := AddBackup(tmpDir, b2); err != nil {
+		t.Fatalf("AddBackup b2 failed: %v", err)
+	}
+	b2.Status = "completed"
+	b2.EndTime = t1
+	if err := UpdateBackup(tmpDir, b2); err != nil {
+		t.Fatalf("UpdateBackup b2 failed: %v", err)
+	}
+
+	// 1. GetLatestBackup must return backup-frac-sec (t1 is chronologically later than t0).
+	// Under the RFC3339Nano bug, "12:00:00Z" > "12:00:00.5Z" because 'Z' > '.', which would
+	// return backup-exact-sec instead.
+	latest, err := GetLatestBackup(tmpDir)
+	if err != nil {
+		t.Fatalf("GetLatestBackup failed: %v", err)
+	}
+	if latest == nil {
+		t.Fatal("expected latest backup, got nil")
+	}
+	if latest.ID != "backup-frac-sec" {
+		t.Errorf("GetLatestBackup returned %q, want %q", latest.ID, "backup-frac-sec")
+	}
+
+	// 2. GetBackupsBefore with cutoff in between t0 and t1:
+	// Cutoff is 12:00:00.250000000Z.
+	// b1 (12:00:00.000000000Z) should be included.
+	// b2 (12:00:00.500000000Z) should be excluded.
+	cutoff := time.Date(2026, 9, 17, 12, 0, 0, 250_000_000, time.UTC)
+	before, err := GetBackupsBefore(tmpDir, cutoff)
+	if err != nil {
+		t.Fatalf("GetBackupsBefore failed: %v", err)
+	}
+	if len(before) != 1 {
+		t.Fatalf("expected 1 backup before %v, got %d: %+v", cutoff, len(before), before)
+	}
+	if before[0].ID != "backup-exact-sec" {
+		t.Errorf("GetBackupsBefore returned %q, want %q", before[0].ID, "backup-exact-sec")
+	}
+
+	// 3. GetBackupsBefore after both backups:
+	afterCutoff := time.Date(2026, 9, 17, 12, 0, 1, 0, time.UTC)
+	both, err := GetBackupsBefore(tmpDir, afterCutoff)
+	if err != nil {
+		t.Fatalf("GetBackupsBefore after both failed: %v", err)
+	}
+	if len(both) != 2 {
+		t.Fatalf("expected 2 backups, got %d", len(both))
+	}
+	if both[0].ID != "backup-exact-sec" || both[1].ID != "backup-frac-sec" {
+		t.Errorf("expected [backup-exact-sec, backup-frac-sec], got [%s, %s]", both[0].ID, both[1].ID)
+	}
+}
+
+func TestLegacyRFC3339NanoTimestampParsing(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	db, err := openDB(tmpDir)
+	if err != nil {
+		t.Fatalf("openDB failed: %v", err)
+	}
+	defer func() { _ = db.Close() }()
+
+	// Directly insert a row formatted with legacy RFC3339Nano (no trailing fractional zeros)
+	legacyStart := "2026-09-17T10:00:00Z"
+	legacyEnd := "2026-09-17T10:30:00Z"
+	_, err = db.Exec(`
+		INSERT INTO backups (id, type, status, start_time, end_time, path)
+		VALUES ('legacy-1', 'full', 'completed', ?, ?, 'legacy-1.xbstream.gz')
+	`, legacyStart, legacyEnd)
+	if err != nil {
+		t.Fatalf("direct insert failed: %v", err)
+	}
+
+	b, err := GetBackupByID(tmpDir, "legacy-1")
+	if err != nil {
+		t.Fatalf("GetBackupByID failed: %v", err)
+	}
+	wantStart := time.Date(2026, 9, 17, 10, 0, 0, 0, time.UTC)
+	wantEnd := time.Date(2026, 9, 17, 10, 30, 0, 0, time.UTC)
+	if !b.StartTime.Equal(wantStart) {
+		t.Errorf("StartTime = %v, want %v", b.StartTime, wantStart)
+	}
+	if !b.EndTime.Equal(wantEnd) {
+		t.Errorf("EndTime = %v, want %v", b.EndTime, wantEnd)
+	}
+}
