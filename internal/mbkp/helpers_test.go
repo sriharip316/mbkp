@@ -350,42 +350,6 @@ func TestCaptureLsnInfo(t *testing.T) {
 	}
 }
 
-func TestCopyFile(t *testing.T) {
-	tmpDir := t.TempDir()
-	src := filepath.Join(tmpDir, "src.txt")
-	dst := filepath.Join(tmpDir, "dst.txt")
-
-	err := os.WriteFile(src, []byte("hello binlog copy"), 0644)
-	if err != nil {
-		t.Fatalf("failed to write src: %v", err)
-	}
-
-	err = copyFile(src, dst)
-	if err != nil {
-		t.Fatalf("copyFile failed: %v", err)
-	}
-
-	data, err := os.ReadFile(dst)
-	if err != nil {
-		t.Fatalf("failed to read dst: %v", err)
-	}
-
-	if string(data) != "hello binlog copy" {
-		t.Errorf("expected 'hello binlog copy', got %q", string(data))
-	}
-
-	// Test copyFile errors
-	err = copyFile("non-existent-source.txt", "dst.txt")
-	if err == nil {
-		t.Error("expected error when copying a non-existent source file")
-	}
-
-	err = copyFile(src, filepath.Join(tmpDir, "non-existent-dir", "dst.txt"))
-	if err == nil {
-		t.Error("expected error when destination directory does not exist")
-	}
-}
-
 func TestOpenDBErrors(t *testing.T) {
 	tmpDir := t.TempDir()
 	filePath := filepath.Join(tmpDir, "blocking_file")
@@ -399,62 +363,6 @@ func TestOpenDBErrors(t *testing.T) {
 	_, err = openDB(badDir)
 	if err == nil {
 		t.Error("expected error when openDB is called with a bad directory path")
-	}
-}
-
-func TestCopyFileAndDir(t *testing.T) {
-	tmpDir := t.TempDir()
-
-	srcDir := filepath.Join(tmpDir, "src")
-	dstDir := filepath.Join(tmpDir, "dst")
-
-	err := os.Mkdir(srcDir, 0755)
-	if err != nil {
-		t.Fatalf("failed to create src dir: %v", err)
-	}
-
-	// Create sub-directory and files
-	subSrcDir := filepath.Join(srcDir, "subdir")
-	err = os.Mkdir(subSrcDir, 0755)
-	if err != nil {
-		t.Fatalf("failed to create subdir: %v", err)
-	}
-
-	f1Path := filepath.Join(srcDir, "file1.txt")
-	err = os.WriteFile(f1Path, []byte("hello world"), 0644)
-	if err != nil {
-		t.Fatalf("failed to write file1: %v", err)
-	}
-
-	f2Path := filepath.Join(subSrcDir, "file2.txt")
-	err = os.WriteFile(f2Path, []byte("sub-hello"), 0755)
-	if err != nil {
-		t.Fatalf("failed to write file2: %v", err)
-	}
-
-	// Test copyDir
-	err = copyDir(srcDir, dstDir)
-	if err != nil {
-		t.Fatalf("copyDir failed: %v", err)
-	}
-
-	// Verify copies
-	f1Copy := filepath.Join(dstDir, "file1.txt")
-	f1Data, err := os.ReadFile(f1Copy)
-	if err != nil {
-		t.Fatalf("failed to read file1 copy: %v", err)
-	}
-	if string(f1Data) != "hello world" {
-		t.Errorf("expected 'hello world', got %q", string(f1Data))
-	}
-
-	f2Copy := filepath.Join(dstDir, "subdir", "file2.txt")
-	f2Data, err := os.ReadFile(f2Copy)
-	if err != nil {
-		t.Fatalf("failed to read file2 copy: %v", err)
-	}
-	if string(f2Data) != "sub-hello" {
-		t.Errorf("expected 'sub-hello', got %q", string(f2Data))
 	}
 }
 

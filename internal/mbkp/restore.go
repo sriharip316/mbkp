@@ -2,69 +2,12 @@ package mbkp
 
 import (
 	"fmt"
-	"io"
 	"log/slog"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
 )
-
-// copyDir recursively copies a directory tree, preserving permissions.
-// Still used for non-archive scenarios (e.g., future extensions).
-func copyDir(src, dst string) error {
-	info, err := os.Stat(src)
-	if err != nil {
-		return err
-	}
-	if err := os.MkdirAll(dst, info.Mode()); err != nil {
-		return err
-	}
-
-	entries, err := os.ReadDir(src)
-	if err != nil {
-		return err
-	}
-
-	for _, entry := range entries {
-		srcPath := filepath.Join(src, entry.Name())
-		dstPath := filepath.Join(dst, entry.Name())
-
-		if entry.IsDir() {
-			if err := copyDir(srcPath, dstPath); err != nil {
-				return err
-			}
-		} else {
-			info, err := entry.Info()
-			if err != nil {
-				return err
-			}
-			if err := copyFileWithMode(srcPath, dstPath, info.Mode()); err != nil {
-				return err
-			}
-		}
-	}
-	return nil
-}
-
-func copyFileWithMode(src, dst string, mode os.FileMode) error {
-	in, err := os.Open(src)
-	if err != nil {
-		return err
-	}
-	defer func() { _ = in.Close() }()
-
-	out, err := os.OpenFile(dst, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, mode)
-	if err != nil {
-		return err
-	}
-	defer func() { _ = out.Close() }()
-
-	if _, err = io.Copy(out, in); err != nil {
-		return err
-	}
-	return out.Sync()
-}
 
 // PrepareChain resolves the backup lineage for backupID, extracts and prepares the backup chain,
 // and returns the path to the prepared directory ready for copy-back.

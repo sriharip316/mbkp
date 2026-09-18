@@ -2,7 +2,6 @@ package main
 
 import (
 	"fmt"
-	"log"
 	"log/slog"
 	"os"
 	"time"
@@ -290,7 +289,6 @@ func init() {
 }
 
 func main() {
-	log.SetFlags(log.LstdFlags)
 	if err := rootCmd.Execute(); err != nil {
 		os.Exit(1)
 	}

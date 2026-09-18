@@ -49,15 +49,10 @@ func openDB(backupDir string) (*sql.DB, error) {
 		return nil, fmt.Errorf("failed to create backup directory: %w", err)
 	}
 
-	db, err := sql.Open("sqlite", dbPath(backupDir))
+	dsn := fmt.Sprintf("file:%s?_pragma=busy_timeout(5000)&_pragma=journal_mode(WAL)", dbPath(backupDir))
+	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		return nil, fmt.Errorf("failed to open backup database: %w", err)
-	}
-
-	// WAL mode allows reads during writes; good practice even for single-writer tools.
-	if _, err := db.Exec("PRAGMA journal_mode=WAL"); err != nil {
-		_ = db.Close()
-		return nil, fmt.Errorf("failed to set WAL journal mode: %w", err)
 	}
 
 	if _, err := db.Exec(`

@@ -16,16 +16,6 @@ import (
 	"github.com/go-sql-driver/mysql"
 )
 
-func TestGetEnv(t *testing.T) {
-	t.Setenv("TEST_ENV_VAR", "value")
-	if getEnv("TEST_ENV_VAR", "default") != "value" {
-		t.Error("expected value")
-	}
-	if getEnv("NON_EXISTENT_VAR", "default") != "default" {
-		t.Error("expected default")
-	}
-}
-
 func TestLoadConfig(t *testing.T) {
 	t.Setenv("MARIADB_HOST", "myhost")
 	t.Setenv("MARIADB_PORT", "1234")

@@ -8,6 +8,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -139,7 +140,7 @@ func extractArchive(streamBin, src, destDir string) error {
 	}
 
 	comp := compressorForArchive(src)
-	decompArgs := append(comp.DecompressArgs, src)
+	decompArgs := append(slices.Clone(comp.DecompressArgs), src)
 	cmdDecomp := exec.Command(comp.Name, decompArgs...)
 	cmdStream := exec.Command(streamBin, "-x", "-C", destDir)
 
@@ -354,7 +355,7 @@ func isValidBackupID(id string) bool {
 
 // streamBackup runs: <backupBin> <mariabackupArgs> | <comp> <compressArgs> > <archive>
 func streamBackup(cfg *Config, archive string, comp Compressor, mariabackupArgs []string) error {
-	outFile, err := os.Create(archive)
+	outFile, err := os.OpenFile(archive, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0600)
 	if err != nil {
 		return fmt.Errorf("failed to create archive file %s: %w", archive, err)
 	}

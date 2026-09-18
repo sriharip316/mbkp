@@ -20,8 +20,10 @@ func ListBackups(cfg *Config, format string) error {
 	switch strings.ToLower(format) {
 	case "json":
 		return listJSON(meta)
-	default:
+	case "table":
 		return listTable(cfg.BackupDir, meta)
+	default:
+		return fmt.Errorf("unknown output format %q (supported: table, json)", format)
 	}
 }
 

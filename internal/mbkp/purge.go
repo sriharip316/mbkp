@@ -127,7 +127,7 @@ func PurgeBackups(cfg *Config, retentionStr string, dryRun bool) error {
 	for _, b := range activeBackups {
 		if b.Status == "completed" {
 			// Check if the backup itself is within the retention window
-			if b.EndTime.After(cutoff) || b.EndTime.Equal(cutoff) {
+			if !b.EndTime.Before(cutoff) {
 				// To keep this backup, we must be able to restore it (entire chain intact)
 				chain, err := resolveChainInMemory(backupMap, b.ID)
 				if err != nil {
@@ -140,7 +140,7 @@ func PurgeBackups(cfg *Config, retentionStr string, dryRun bool) error {
 			}
 		} else {
 			// For failed or in_progress backups, keep them if they started within the retention window
-			if b.StartTime.After(cutoff) || b.StartTime.Equal(cutoff) {
+			if !b.StartTime.Before(cutoff) {
 				keepIDs[b.ID] = true
 			}
 		}

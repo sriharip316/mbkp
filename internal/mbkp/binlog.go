@@ -3,7 +3,6 @@ package mbkp
 import (
 	"database/sql"
 	"fmt"
-	"io"
 	"log/slog"
 	"os"
 	"os/exec"
@@ -150,7 +149,7 @@ func compressAndCopyFile(src, dst string, comp Compressor) error {
 	}
 	defer func() { _ = inFile.Close() }()
 
-	outFile, err := os.Create(dst)
+	outFile, err := os.OpenFile(dst, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0600)
 	if err != nil {
 		return err
 	}
@@ -162,23 +161,4 @@ func compressAndCopyFile(src, dst string, comp Compressor) error {
 	cmdCompress.Stderr = os.Stderr
 
 	return cmdCompress.Run()
-}
-
-func copyFile(src, dst string) error {
-	in, err := os.Open(src)
-	if err != nil {
-		return err
-	}
-	defer func() { _ = in.Close() }()
-
-	out, err := os.Create(dst)
-	if err != nil {
-		return err
-	}
-	defer func() { _ = out.Close() }()
-
-	if _, err = io.Copy(out, in); err != nil {
-		return err
-	}
-	return out.Sync()
 }

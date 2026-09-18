@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -150,7 +151,7 @@ func RunPITR(cfg *Config, targetTime time.Time, datadir string, newServerUUID bo
 
 	_ = os.MkdirAll(cfg.BackupDir, 0755)
 	logFilePath := filepath.Join(cfg.BackupDir, "pitr_mariadbd.log")
-	logFile, err := os.Create(logFilePath)
+	logFile, err := os.OpenFile(logFilePath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0600)
 	if err != nil {
 		return fmt.Errorf("failed to create recovery database log file: %w", err)
 	}
@@ -321,13 +322,13 @@ func RunPITR(cfg *Config, targetTime time.Time, datadir string, newServerUUID bo
 
 func decompressFile(src, dst string) error {
 	comp := compressorForArchive(src)
-	outFile, err := os.Create(dst)
+	outFile, err := os.OpenFile(dst, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0600)
 	if err != nil {
 		return err
 	}
 	defer func() { _ = outFile.Close() }()
 
-	decompArgs := append(comp.DecompressArgs, src)
+	decompArgs := append(slices.Clone(comp.DecompressArgs), src)
 	cmdDecomp := exec.Command(comp.Name, decompArgs...)
 	cmdDecomp.Stdout = outFile
 	cmdDecomp.Stderr = os.Stderr

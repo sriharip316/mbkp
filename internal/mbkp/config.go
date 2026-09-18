@@ -148,13 +148,6 @@ func LoadConfig(backupDirFlag string) (*Config, error) {
 	}, nil
 }
 
-func getEnv(key, defaultVal string) string {
-	if val, exists := os.LookupEnv(key); exists {
-		return val
-	}
-	return defaultVal
-}
-
 // GetDSN creates a data source name for the mysql driver
 func (c *Config) GetDSN() (string, error) {
 	mc := mysql.NewConfig()
