@@ -69,10 +69,21 @@ func copyFileWithMode(src, dst string, mode os.FileMode) error {
 // PrepareChain resolves the backup lineage for backupID, extracts and prepares the backup chain,
 // and returns the path to the prepared directory ready for copy-back.
 func PrepareChain(cfg *Config, backupID string) (string, error) {
+	if backupID != "" && !isValidBackupID(backupID) {
+		return "", fmt.Errorf("invalid backup ID %q", backupID)
+	}
+
 	// 1. Resolve the chain of backups
 	chain, err := ResolveChain(cfg.BackupDir, backupID)
 	if err != nil {
 		return "", fmt.Errorf("failed to resolve backup chain for ID %q: %w", backupID, targetIDError(backupID, err))
+	}
+
+	if backupID == "" {
+		backupID = chain[len(chain)-1].ID
+	}
+	if !isValidBackupID(backupID) {
+		return "", fmt.Errorf("invalid backup ID %q", backupID)
 	}
 
 	slog.Info("Resolved backup chain", "length", len(chain))
@@ -85,6 +96,13 @@ func PrepareChain(cfg *Config, backupID string) (string, error) {
 	if err := os.RemoveAll(prepareDir); err != nil {
 		return "", fmt.Errorf("failed to clean existing prepare directory: %w", err)
 	}
+
+	succeeded := false
+	defer func() {
+		if !succeeded {
+			_ = os.RemoveAll(prepareDir)
+		}
+	}()
 
 	fullBackup := chain[0]
 	fullArchive := filepath.Join(cfg.BackupDir, fullBackup.Path)
@@ -177,6 +195,7 @@ func PrepareChain(cfg *Config, backupID string) (string, error) {
 		}
 	}
 
+	succeeded = true
 	return prepareDir, nil
 }
 
@@ -289,6 +308,10 @@ func restoreServerUUID(cfg *Config, prepareDir, datadir string, newServerUUID bo
 }
 
 func RestoreBackup(cfg *Config, backupID string, datadir string, prepareOnly bool, newServerUUID bool) error {
+	if backupID != "" && !isValidBackupID(backupID) {
+		return fmt.Errorf("invalid backup ID %q", backupID)
+	}
+
 	// If backupID is empty, find the latest completed backup
 	if backupID == "" {
 		latest, err := GetLatestBackup(cfg.BackupDir)
@@ -299,6 +322,30 @@ func RestoreBackup(cfg *Config, backupID string, datadir string, prepareOnly boo
 			return fmt.Errorf("no completed backups found to restore")
 		}
 		backupID = latest.ID
+	}
+	if !isValidBackupID(backupID) {
+		return fmt.Errorf("invalid backup ID %q", backupID)
+	}
+
+	// Validate target datadir upfront before running the expensive prepare operation
+	if !prepareOnly {
+		if datadir == "" {
+			return fmt.Errorf("datadir must be specified for copy-back operation")
+		}
+		if info, err := os.Stat(datadir); err == nil {
+			if !info.IsDir() {
+				return fmt.Errorf("target datadir %s is not a directory", datadir)
+			}
+			entries, err := os.ReadDir(datadir)
+			if err != nil {
+				return fmt.Errorf("failed to read datadir: %w", err)
+			}
+			if len(entries) > 0 {
+				return fmt.Errorf("target datadir %s is not empty. Please clear or remove it before restore", datadir)
+			}
+		} else if !os.IsNotExist(err) {
+			return fmt.Errorf("failed to stat datadir: %w", err)
+		}
 	}
 
 	// 1. Prepare the database files
@@ -319,26 +366,10 @@ func RestoreBackup(cfg *Config, backupID string, datadir string, prepareOnly boo
 	}()
 
 	// 2. Perform copy-back
-	if datadir == "" {
-		return fmt.Errorf("datadir must be specified for copy-back operation")
-	}
-
 	slog.Info("Restoring prepared files to data directory", "prepare_dir", prepareDir, "datadir", datadir)
 
-	// Check if datadir exists. If it does, verify it is empty (except maybe '.' or '..')
-	if info, err := os.Stat(datadir); err == nil {
-		if !info.IsDir() {
-			return fmt.Errorf("target datadir %s is not a directory", datadir)
-		}
-		entries, err := os.ReadDir(datadir)
-		if err != nil {
-			return fmt.Errorf("failed to read datadir: %w", err)
-		}
-		if len(entries) > 0 {
-			return fmt.Errorf("target datadir %s is not empty. Please clear or remove it before restore", datadir)
-		}
-	} else if os.IsNotExist(err) {
-		// Create target datadir if it doesn't exist
+	// Create target datadir if it doesn't exist
+	if _, err := os.Stat(datadir); os.IsNotExist(err) {
 		if err := os.MkdirAll(datadir, 0755); err != nil {
 			return fmt.Errorf("failed to create target datadir: %w", err)
 		}

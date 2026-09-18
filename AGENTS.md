@@ -91,14 +91,14 @@ graph TD
 
 ### 2. Restore & Prepare Workflow
 To restore an incremental backup, the system must rebuild the state step-by-step:
-1.  **Resolve Chain**: Travel backwards from the target incremental ID via `parent_id` entries until the base `full` backup is found.
-2.  **Extract Base**: Decompress and extract the base full backup archive into a temporary directory using `<decompressor> -dc | mbstream -x -C <prepareDir>`.
+1.  **Resolve Chain**: Travel backwards from the target incremental ID via `parent_id` entries until the base `full` backup is found (with cycle detection and backup ID validation guarding against corrupted catalogs).
+2.  **Extract Base**: Decompress and extract the base full backup archive into a temporary directory using `<decompressor> -dc | mbstream -x -C <prepareDir>` (the `prepare_<backupID>` directory is cleaned up via defer if any prepare or extraction step fails).
 3.  **Prepare Base**: Run `mariabackup --prepare --target-dir=<prepareDir>` (for `xtrabackup`, include `--apply-log-only`).
 4.  **Apply Incrementals**: For each incremental backup in chronological order:
     *   Extract archive to a temporary incremental folder.
     *   Run `mariabackup --prepare --target-dir=<prepareDir> --incremental-dir=<tempIncDir>` (for `xtrabackup`, include `--apply-log-only` on all intermediate steps, but omit it on the last incremental step).
 5.  **Finalize**: Run `mariabackup --prepare --target-dir=<prepareDir>` a final time to roll back uncommitted transactions.
-6.  **Copy-Back**: Verify target data directory is empty, then run `mariabackup --copy-back --target-dir=<prepareDir> --datadir=<datadir>`.
+6.  **Copy-Back**: Verify target data directory is empty (validated upfront before the expensive prepare to fail fast), then run `mariabackup --copy-back --target-dir=<prepareDir> --datadir=<datadir>`.
 7.  **Server Identity (MySQL/Percona only)**: After copy-back, rebuild `<datadir>/auto.cnf` from the `server_uuid` line recorded in the prepared backup's `backup-my.cnf` (xtrabackup deliberately excludes `auto.cnf` from archives but records the UUID there — note it uses the underscore spelling `server_uuid`, while `auto.cnf` uses `server-uuid`). This keeps `gtid_executed` a single-UUID set across recovery generations instead of fragmenting it (`A:1-100,B:1-5,…`) with a fresh UUID per restore. MariaDB restores never touch `auto.cnf` (its GTIDs are `domain-server_id-seq` based). The `--new-server-uuid` flag (`restore` and `pitr` commands) opts out: no `auto.cnf` is written (and any stale one surviving copy-back is removed), so the server generates a fresh UUID on first start. A missing/malformed UUID in `backup-my.cnf` degrades to the old behavior with a warning; a failure to write `auto.cnf` fails the restore.
 
 ### 3. Point-in-Time Recovery (PITR)
@@ -127,7 +127,7 @@ The `purge` command enforces the backup retention policy:
 2.  **External Cleanup**: Scan the metadata catalog. If any archive file is missing from disk, print a warning and delete its metadata record from SQLite.
 3.  **Lineage Protection**: Identify completed backups within the retention window. Trace their restoration lineage chain. Mark all ancestors (parents/grandparents) to be kept so that the active backups remain restorable.
 4.  **Clean Archives & Metadata**: Delete any backup archive files not marked to be kept from the disk and delete their SQLite metadata records.
-5.  **Prune Binlogs**: Find the earliest binlog file required by the oldest kept backup. Delete archived binlog files from disk only if they are both expired (older than the cutoff time) and older than that earliest required binlog file.
+5.  **Prune Binlogs**: Find the earliest binlog file required by the oldest kept backup. If the oldest kept backup has no recorded binlog file (unknown boundary), all archived binlogs are safely retained to prevent data loss. Otherwise, delete archived binlog files from disk only if they are both expired (older than the cutoff time) and older than that earliest required binlog file.
 
 ---
 
@@ -200,13 +200,14 @@ These tests use Podman/Docker to orchestrate isolated MariaDB containers and val
 > *   **Cross-Process Serialization**: Mutating commands must hold the exclusive `flock` on `<backup-dir>/.mbkp.lock` (`AcquireLock` in `internal/mbkp/lock.go`) for their entire run. Acquire it only at the CLI entry points in `cmd/mbkp/main.go`, never inside `internal/mbkp` functions — internal calls such as `RunPITR` → `RestoreBackup` run in one process and would self-deadlock on a second file description. The lock file is created once and never unlinked. `list` stays lock-free.
 > *   **Strict Catalog Inserts**: `AddBackup` is insert-only — never reintroduce an upsert-by-ID: two runs sharing an ID must fail loudly (PRIMARY KEY violation), never silently merge rows. The `in_progress` → `completed`/`failed` transition goes through `UpdateBackup`, which only touches status/end_time/binlog_file/gtid/checkpoints.
 > *   **Backward Compatibility**: Ensure that schema alterations to the SQLite table `backups` are backward compatible. Handle missing columns or fallback defaults carefully.
-> *   **Empty Directory Check**: Before running `mariabackup --copy-back`, always check if the target data directory exists and is empty (excluding `.` and `..`). Do not write backups over existing operational databases.
-> *   **Resource Leak Cleanup**: When extracting compressed archives for recovery (`RestoreBackup` or `RunPITR`), ensure all temporary extraction folders are properly cleaned up via `defer os.RemoveAll(...)` even when steps fail.
+> *   **Empty Directory Check**: Before running `mariabackup --copy-back`, always check if the target data directory exists and is empty (excluding `.` and `..`). Do not write backups over existing operational databases. `RestoreBackup` validates this upfront to fail fast before the expensive prepare.
+> *   **Resource Leak Cleanup**: When extracting compressed archives for recovery (`RestoreBackup` or `RunPITR`), ensure all temporary extraction folders and prepare directories (`prepare_<id>`) are properly cleaned up via `defer os.RemoveAll(...)` even when steps fail. When a pipeline command fails to start, any already-started child process is reaped with `cmd.Wait()` after `Process.Kill()` to prevent zombie processes.
 > *   **Pipeline Errors**: Always capture and check exit errors for all piped commands (e.g., both `mariabackup` and the compression utility `lz4`/`gzip`). Do not ignore intermediate pipe errors.
+> *   **Backup ID Validation & Cycle Guard**: All backup IDs and parent IDs are validated against `^[A-Za-z0-9_-]+$` before filesystem path construction or database operations to prevent path injection. Lineage chain resolution in `ResolveChain` and `resolveChainInMemory` includes cycle detection to guard against corrupted catalogs.
 > *   **Pruning Dependencies**: Never purge parent backups that newer incremental backups depend on, even if those parents are outside the retention window.
 > *   **Dry-run Mode Safety**: Always honor the `--dry-run` flag to preview modifications before performing any deletion on disk or SQLite metadata.
 > *   **External Deletion Handling**: If archive files are missing from disk, log a warning and clean up their SQLite metadata rather than throwing a blocking error.
-> *   **Binlog Retention**: Retain any archived binary logs that might be required by any of the kept physical backups (i.e. those with a filename lexicographically greater than or equal to the earliest kept backup's start binlog file), even if their age is outside the retention window.
+> *   **Binlog Retention**: Retain any archived binary logs that might be required by any of the kept physical backups (i.e. those with a filename lexicographically greater than or equal to the earliest kept backup's start binlog file), even if their age is outside the retention window. If the oldest kept backup has no recorded binlog file (e.g. capture failed at backup time), safely retain all archived binlogs.
 > *   **Latest Binlog Exclusion**: When backing up binary logs, always exclude the latest active binary log file created after the log flush.
 > *   **Temporary Binlog Cleanup**: Any temporary binlog decompression directories created during PITR execution must be defer-cleaned up.
 > *   **Credentials Security**: Never pass the database password as a command line argument (e.g. `--password`) to external utilities or print it in application logs. Use the `MYSQL_PWD` environment variable to securely pass the password to child processes.

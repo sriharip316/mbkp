@@ -457,3 +457,48 @@ func TestScanBackupTimestampParseErrors(t *testing.T) {
 		t.Errorf("StartTime = %v, want %v", b.StartTime, wantStart)
 	}
 }
+
+func TestResolveChainCycleDetection(t *testing.T) {
+	tmpDir := t.TempDir()
+	db, err := openDB(tmpDir)
+	if err != nil {
+		t.Fatalf("openDB failed: %v", err)
+	}
+	defer func() { _ = db.Close() }()
+
+	// Insert cyclic backup records: inc-a -> inc-b -> inc-a
+	_, err = db.Exec(`
+		INSERT INTO backups (id, type, status, start_time, end_time, path, parent_id)
+		VALUES 
+			('inc-a', 'incremental', 'completed', '2026-09-17T12:00:00Z', '2026-09-17T12:05:00Z', 'inc-a.xbstream.gz', 'inc-b'),
+			('inc-b', 'incremental', 'completed', '2026-09-17T12:10:00Z', '2026-09-17T12:15:00Z', 'inc-b.xbstream.gz', 'inc-a')
+	`)
+	if err != nil {
+		t.Fatalf("insert cyclic backups failed: %v", err)
+	}
+
+	_, err = ResolveChain(tmpDir, "inc-a")
+	if err == nil {
+		t.Fatal("expected ResolveChain to detect cycle and return error, got nil")
+	}
+	if !strings.Contains(err.Error(), "cycle detected in parent chain") {
+		t.Errorf("unexpected error message: %v", err)
+	}
+
+	// Insert self-cycle: inc-self -> inc-self
+	_, err = db.Exec(`
+		INSERT INTO backups (id, type, status, start_time, end_time, path, parent_id)
+		VALUES ('inc-self', 'incremental', 'completed', '2026-09-17T12:20:00Z', '2026-09-17T12:25:00Z', 'inc-self.xbstream.gz', 'inc-self')
+	`)
+	if err != nil {
+		t.Fatalf("insert self-cyclic backup failed: %v", err)
+	}
+
+	_, err = ResolveChain(tmpDir, "inc-self")
+	if err == nil {
+		t.Fatal("expected ResolveChain to detect self-cycle and return error, got nil")
+	}
+	if !strings.Contains(err.Error(), "cycle detected in parent chain") {
+		t.Errorf("unexpected error message: %v", err)
+	}
+}

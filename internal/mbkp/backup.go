@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"sync"
@@ -158,6 +159,7 @@ func extractArchive(streamBin, src, destDir string) error {
 	}
 	if err := cmdStream.Start(); err != nil {
 		_ = cmdDecomp.Process.Kill()
+		_ = cmdDecomp.Wait()
 		return fmt.Errorf("failed to start %s: %w", streamBin, err)
 	}
 
@@ -340,6 +342,16 @@ func newBackupID(prefix string) string {
 	return fmt.Sprintf("%s%s_%03d", prefix, t.Format("20060102_150405"), ms%1000)
 }
 
+// backupIDRe matches safe backup IDs consisting only of alphanumeric characters,
+// dashes, and underscores. This protects against directory traversal and path
+// injection when backup IDs are used in filesystem operations.
+var backupIDRe = regexp.MustCompile(`^[A-Za-z0-9_-]+$`)
+
+// isValidBackupID reports whether id contains only characters safe for filesystem paths.
+func isValidBackupID(id string) bool {
+	return backupIDRe.MatchString(id)
+}
+
 // streamBackup runs: <backupBin> <mariabackupArgs> | <comp> <compressArgs> > <archive>
 func streamBackup(cfg *Config, archive string, comp Compressor, mariabackupArgs []string) error {
 	outFile, err := os.Create(archive)
@@ -395,6 +407,7 @@ func streamBackup(cfg *Config, archive string, comp Compressor, mariabackupArgs 
 	}
 	if err := cmdCompress.Start(); err != nil {
 		_ = cmdMariabackup.Process.Kill()
+		_ = cmdMariabackup.Wait()
 		_ = outFile.Close()
 		return fmt.Errorf("failed to start %s: %w", comp.Name, err)
 	}
@@ -488,6 +501,9 @@ func RunIncrementalBackup(cfg *Config, parentID string) error {
 	var err error
 
 	if parentID != "" {
+		if !isValidBackupID(parentID) {
+			return fmt.Errorf("invalid parent backup ID %q", parentID)
+		}
 		parentBackup, err = GetBackupByID(cfg.BackupDir, parentID)
 		if err != nil {
 			return fmt.Errorf("specified parent backup not found: %w", err)

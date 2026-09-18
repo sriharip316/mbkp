@@ -303,6 +303,7 @@ func RunPITR(cfg *Config, targetTime time.Time, datadir string, newServerUUID bo
 
 	if err := cmdMariaDB.Start(); err != nil {
 		_ = cmdBinlog.Process.Kill()
+		_ = cmdBinlog.Wait()
 		return fmt.Errorf("failed to start %s client: %w", cfg.ClientBin, err)
 	}
 

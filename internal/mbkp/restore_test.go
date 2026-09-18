@@ -3,7 +3,9 @@ package mbkp
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
+	"time"
 )
 
 // pxb84BackupMyCnf is the backup-my.cnf content Percona XtraBackup 8.4 wrote
@@ -119,5 +121,122 @@ func TestWriteAutoCnf(t *testing.T) {
 	// into a re-created datadir).
 	if err := writeAutoCnf(dir, uuid); err != nil {
 		t.Fatalf("second writeAutoCnf() error = %v", err)
+	}
+}
+
+func TestBackupIDValidation(t *testing.T) {
+	validIDs := []string{
+		"full_20260914_093000_482",
+		"inc_20260914_093000_482",
+		"full-123",
+		"backup1",
+		"TEST_BACKUP-01",
+	}
+	for _, id := range validIDs {
+		if !isValidBackupID(id) {
+			t.Errorf("isValidBackupID(%q) = false, want true", id)
+		}
+	}
+
+	invalidIDs := []string{
+		"",
+		"../../etc",
+		"backup/sub",
+		"backup;rm",
+		"id with spaces",
+		"backup.tar.gz",
+		"backup$var",
+	}
+	for _, id := range invalidIDs {
+		if isValidBackupID(id) {
+			t.Errorf("isValidBackupID(%q) = true, want false", id)
+		}
+	}
+
+	cfg := &Config{BackupDir: t.TempDir()}
+	if err := RestoreBackup(cfg, "../../bad", "/tmp/datadir", false, false); err == nil || !strings.Contains(err.Error(), "invalid backup ID") {
+		t.Errorf("RestoreBackup with invalid ID expected error, got %v", err)
+	}
+
+	if _, err := PrepareChain(cfg, "../../bad"); err == nil || !strings.Contains(err.Error(), "invalid backup ID") {
+		t.Errorf("PrepareChain with invalid ID expected error, got %v", err)
+	}
+
+	if err := RunIncrementalBackup(cfg, "../../bad"); err == nil || !strings.Contains(err.Error(), "invalid parent backup ID") {
+		t.Errorf("RunIncrementalBackup with invalid parent ID expected error, got %v", err)
+	}
+}
+
+func TestPrepareChainCleansUpOnFailure(t *testing.T) {
+	tmpDir := t.TempDir()
+	cfg := &Config{
+		BackupDir: tmpDir,
+		StreamBin: "false",
+		BackupBin: "false",
+	}
+
+	// Add a backup entry in the database
+	b := BackupMetadata{
+		ID:        "full-test-cleanup",
+		Type:      "full",
+		Status:    "completed",
+		StartTime: time.Now().Add(-10 * time.Minute),
+		EndTime:   time.Now().Add(-5 * time.Minute),
+		Path:      "corrupt.xbstream.gz",
+	}
+	if err := AddBackup(tmpDir, b); err != nil {
+		t.Fatalf("AddBackup failed: %v", err)
+	}
+	// Create corrupt archive file
+	if err := os.WriteFile(filepath.Join(tmpDir, b.Path), []byte("corrupted archive"), 0644); err != nil {
+		t.Fatalf("failed to write dummy archive: %v", err)
+	}
+
+	prepareDir := filepath.Join(tmpDir, "prepare_"+b.ID)
+
+	_, err := PrepareChain(cfg, b.ID)
+	if err == nil {
+		t.Fatal("expected PrepareChain to fail, but got nil")
+	}
+
+	// Verify prepareDir was cleaned up and does not exist
+	if _, err := os.Stat(prepareDir); !os.IsNotExist(err) {
+		t.Errorf("prepareDir %s still exists after failure, expected it to be cleaned up", prepareDir)
+	}
+}
+
+func TestRestoreBackupDatadirFailFast(t *testing.T) {
+	tmpDir := t.TempDir()
+	cfg := &Config{
+		BackupDir: tmpDir,
+		StreamBin: "nonexistent-stream-bin",
+		BackupBin: "nonexistent-backup-bin",
+	}
+
+	// Empty datadir parameter
+	if err := RestoreBackup(cfg, "valid-id", "", false, false); err == nil || !strings.Contains(err.Error(), "datadir must be specified") {
+		t.Errorf("RestoreBackup with empty datadir expected error, got %v", err)
+	}
+
+	// Non-empty datadir parameter
+	dataDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dataDir, "somefile.txt"), []byte("data"), 0644); err != nil {
+		t.Fatalf("failed to write file in datadir: %v", err)
+	}
+
+	// Should fail fast before even looking for backup tools or resolving backup
+	err := RestoreBackup(cfg, "valid-id", dataDir, false, false)
+	if err == nil || !strings.Contains(err.Error(), "is not empty") {
+		t.Errorf("RestoreBackup with non-empty datadir expected error about not empty, got %v", err)
+	}
+
+	// Datadir pointing to a file instead of directory
+	filePath := filepath.Join(tmpDir, "file_as_dir")
+	if err := os.WriteFile(filePath, []byte("data"), 0644); err != nil {
+		t.Fatalf("failed to write file: %v", err)
+	}
+	err = RestoreBackup(cfg, "valid-id", filePath, false, false)
+	if err == nil || !strings.Contains(err.Error(), "is not a directory") {
+		t.Errorf("RestoreBackup with file datadir expected 'not a directory' error, got %v", err)
 	}
 }

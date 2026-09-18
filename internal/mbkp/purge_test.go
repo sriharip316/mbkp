@@ -313,3 +313,82 @@ func TestPurgeBackups(t *testing.T) {
 		t.Errorf("inc_new archive was not purged after broken chain dependency analysis")
 	}
 }
+
+func TestPurgeBackups_OldestKeptBackupNoBinlog(t *testing.T) {
+	tmpDir := t.TempDir()
+	cfg := &Config{
+		BackupDir: tmpDir,
+	}
+
+	// Create a completed backup within retention (kept), but with NO BinlogFile recorded
+	now := time.Now()
+	b := BackupMetadata{
+		ID:         "full_kept_no_binlog",
+		Type:       "full",
+		Status:     "completed",
+		StartTime:  now.Add(-1 * time.Hour),
+		EndTime:    now.Add(-50 * time.Minute),
+		Path:       "full_kept.xbstream.lz4",
+		BinlogFile: "", // empty binlog file: unknown boundary!
+	}
+	if err := AddBackup(tmpDir, b); err != nil {
+		t.Fatalf("AddBackup failed: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(tmpDir, b.Path), []byte("archive data"), 0644); err != nil {
+		t.Fatalf("write archive failed: %v", err)
+	}
+
+	// Create binlogs directory with expired binlogs
+	binlogsDir := filepath.Join(tmpDir, "binlogs")
+	if err := os.MkdirAll(binlogsDir, 0755); err != nil {
+		t.Fatalf("mkdir binlogs failed: %v", err)
+	}
+
+	binlogFile := filepath.Join(binlogsDir, "mysql-bin.000001.lz4")
+	if err := os.WriteFile(binlogFile, []byte("binlog data"), 0644); err != nil {
+		t.Fatalf("write binlog failed: %v", err)
+	}
+	// Make binlog older than retention cutoff (e.g., 5 days old)
+	expiredTime := now.Add(-5 * 24 * time.Hour)
+	if err := os.Chtimes(binlogFile, expiredTime, expiredTime); err != nil {
+		t.Fatalf("chtimes failed: %v", err)
+	}
+
+	// Purge with 2-day retention
+	if err := PurgeBackups(cfg, "2d", false); err != nil {
+		t.Fatalf("PurgeBackups failed: %v", err)
+	}
+
+	// The binlog MUST be retained because oldestKeptBackup has an unknown binlog boundary
+	if _, err := os.Stat(binlogFile); os.IsNotExist(err) {
+		t.Errorf("expected expired binlog to be retained when oldest kept backup has no BinlogFile, but it was deleted")
+	}
+}
+
+func TestResolveChainInMemory_CycleDetection(t *testing.T) {
+	now := time.Now()
+	backupMap := map[string]BackupMetadata{
+		"inc-a": {
+			ID:        "inc-a",
+			Type:      "incremental",
+			Status:    "completed",
+			StartTime: now.Add(-2 * time.Hour),
+			ParentID:  "inc-b",
+		},
+		"inc-b": {
+			ID:        "inc-b",
+			Type:      "incremental",
+			Status:    "completed",
+			StartTime: now.Add(-1 * time.Hour),
+			ParentID:  "inc-a",
+		},
+	}
+
+	_, err := resolveChainInMemory(backupMap, "inc-a")
+	if err == nil {
+		t.Fatal("expected resolveChainInMemory to detect cycle, got nil")
+	}
+	if !strings.Contains(err.Error(), "cycle detected in parent chain") {
+		t.Errorf("unexpected error message: %v", err)
+	}
+}

@@ -49,7 +49,16 @@ func ParseRetentionDuration(s string) (time.Duration, error) {
 func resolveChainInMemory(backupMap map[string]BackupMetadata, targetID string) ([]BackupMetadata, error) {
 	var chain []BackupMetadata
 	currID := targetID
+	visited := make(map[string]bool)
 	for currID != "" {
+		if !isValidBackupID(currID) {
+			return nil, fmt.Errorf("invalid backup ID %q in lineage chain", currID)
+		}
+		if visited[currID] {
+			return nil, fmt.Errorf("cycle detected in parent chain at %q", currID)
+		}
+		visited[currID] = true
+
 		b, exists := backupMap[currID]
 		if !exists || b.Status != "completed" {
 			return nil, fmt.Errorf("backup ID %q in lineage chain not found or not completed", currID)
@@ -171,9 +180,14 @@ func PurgeBackups(cfg *Config, retentionStr string, dryRun bool) error {
 	for _, b := range activeBackups {
 		if keepIDs[b.ID] && b.Status == "completed" {
 			if oldestKeptBackup == nil || b.StartTime.Before(oldestKeptBackup.StartTime) {
-				oldestKeptBackup = &b
+				bCopy := b
+				oldestKeptBackup = &bCopy
 			}
 		}
+	}
+
+	if oldestKeptBackup != nil && oldestKeptBackup.BinlogFile == "" {
+		slog.Warn("Oldest kept backup has no recorded binlog file; retaining all archived binlogs to prevent data loss", "backup_id", oldestKeptBackup.ID)
 	}
 
 	binlogsDir := filepath.Join(cfg.BackupDir, "binlogs")
@@ -210,10 +224,12 @@ func PurgeBackups(cfg *Config, retentionStr string, dryRun bool) error {
 			binlogNameWithoutExt = before
 		}
 
-		if oldestKeptBackup != nil && oldestKeptBackup.BinlogFile != "" {
-			shouldDelete = isExpired && (binlogNameWithoutExt < oldestKeptBackup.BinlogFile)
-		} else {
+		if oldestKeptBackup == nil {
 			shouldDelete = isExpired
+		} else if oldestKeptBackup.BinlogFile == "" {
+			shouldDelete = false
+		} else {
+			shouldDelete = isExpired && (binlogNameWithoutExt < oldestKeptBackup.BinlogFile)
 		}
 
 		if shouldDelete {

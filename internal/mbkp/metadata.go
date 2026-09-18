@@ -295,6 +295,10 @@ func GetBackupByID(backupDir string, id string) (*BackupMetadata, error) {
 
 // ResolveChain returns the ordered backup chain (full → ... → target) needed to restore targetID.
 func ResolveChain(backupDir string, targetID string) ([]BackupMetadata, error) {
+	if targetID != "" && !isValidBackupID(targetID) {
+		return nil, fmt.Errorf("invalid backup ID %q", targetID)
+	}
+
 	db, err := openDB(backupDir)
 	if err != nil {
 		return nil, err
@@ -304,8 +308,17 @@ func ResolveChain(backupDir string, targetID string) ([]BackupMetadata, error) {
 	// Walk the parent_id chain from target back to the root full backup.
 	var chain []BackupMetadata
 	currID := targetID
+	visited := make(map[string]bool)
 
 	for currID != "" {
+		if !isValidBackupID(currID) {
+			return nil, fmt.Errorf("invalid backup ID %q in lineage chain", currID)
+		}
+		if visited[currID] {
+			return nil, fmt.Errorf("cycle detected in parent chain at %q", currID)
+		}
+		visited[currID] = true
+
 		rows, err := db.Query(selectBackup+` WHERE id = ? AND status = 'completed'`, currID)
 		if err != nil {
 			return nil, fmt.Errorf("failed to query backup %q: %w", currID, err)
