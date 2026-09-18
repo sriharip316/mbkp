@@ -1,9 +1,13 @@
 package main
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
+	"os/signal"
+	"syscall"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -50,165 +54,173 @@ Environment Variables:
 
   Backup Location:
     Backup Dir: MBKP_BACKUP_DIR (overridden by --backup-dir flag)`,
-	Run: func(cmd *cobra.Command, args []string) {
+	SilenceErrors: true,
+	SilenceUsage:  true,
+	RunE: func(cmd *cobra.Command, args []string) error {
 		_ = cmd.Help()
-		os.Exit(1)
+		return fmt.Errorf("subcommand required")
 	},
 }
 
 var backupCmd = &cobra.Command{
 	Use:   "backup",
 	Short: "Perform a backup (full, incremental, or binlog)",
-	Run: func(cmd *cobra.Command, args []string) {
+	RunE: func(cmd *cobra.Command, args []string) error {
 		fmt.Println("Error: backup subcommand (full, incremental, binlog) is required.")
 		fmt.Println("Usage: mbkp backup <full | incremental | binlog>")
-		os.Exit(1)
+		return fmt.Errorf("backup subcommand required")
 	},
 }
 
 var backupFullCmd = &cobra.Command{
 	Use:   "full",
 	Short: "Perform a full physical backup of MariaDB",
-	Run: func(cmd *cobra.Command, args []string) {
+	RunE: func(cmd *cobra.Command, args []string) error {
 		cfg, err := mbkp.LoadConfig(backupDir)
 		if err != nil {
 			slog.Error("Configuration error", "error", err)
-			os.Exit(1)
+			return err
 		}
 		release, err := mbkp.AcquireLock(cfg.BackupDir)
 		if err != nil {
 			slog.Error("Cannot start full backup", "error", err)
-			os.Exit(1)
+			return err
 		}
 		defer func() { _ = release() }()
-		if err := mbkp.RunFullBackup(cfg); err != nil {
+		if err := mbkp.RunFullBackup(cmd.Context(), cfg); err != nil {
 			slog.Error("Full backup failed", "error", err)
-			os.Exit(1)
+			return err
 		}
+		return nil
 	},
 }
 
 var backupIncrementalCmd = &cobra.Command{
 	Use:   "incremental",
 	Short: "Perform an incremental physical backup",
-	Run: func(cmd *cobra.Command, args []string) {
+	RunE: func(cmd *cobra.Command, args []string) error {
 		cfg, err := mbkp.LoadConfig(backupDir)
 		if err != nil {
 			slog.Error("Configuration error", "error", err)
-			os.Exit(1)
+			return err
 		}
 		release, err := mbkp.AcquireLock(cfg.BackupDir)
 		if err != nil {
 			slog.Error("Cannot start incremental backup", "error", err)
-			os.Exit(1)
+			return err
 		}
 		defer func() { _ = release() }()
-		if err := mbkp.RunIncrementalBackup(cfg, parentId); err != nil {
+		if err := mbkp.RunIncrementalBackup(cmd.Context(), cfg, parentId); err != nil {
 			slog.Error("Incremental backup failed", "error", err)
-			os.Exit(1)
+			return err
 		}
+		return nil
 	},
 }
 
 var backupBinlogCmd = &cobra.Command{
 	Use:   "binlog",
 	Short: "Flush and archive MariaDB binary logs",
-	Run: func(cmd *cobra.Command, args []string) {
+	RunE: func(cmd *cobra.Command, args []string) error {
 		cfg, err := mbkp.LoadConfig(backupDir)
 		if err != nil {
 			slog.Error("Configuration error", "error", err)
-			os.Exit(1)
+			return err
 		}
 		release, err := mbkp.AcquireLock(cfg.BackupDir)
 		if err != nil {
 			slog.Error("Cannot start binlog archiving", "error", err)
-			os.Exit(1)
+			return err
 		}
 		defer func() { _ = release() }()
-		if err := mbkp.BackupBinlogs(cfg); err != nil {
+		if err := mbkp.BackupBinlogs(cmd.Context(), cfg); err != nil {
 			slog.Error("Binlog archiving failed", "error", err)
-			os.Exit(1)
+			return err
 		}
+		return nil
 	},
 }
 
 var listCmd = &cobra.Command{
 	Use:   "list",
 	Short: "List all backups",
-	Run: func(cmd *cobra.Command, args []string) {
+	RunE: func(cmd *cobra.Command, args []string) error {
 		cfg, err := mbkp.LoadConfig(backupDir)
 		if err != nil {
 			slog.Error("Configuration error", "error", err)
-			os.Exit(1)
+			return err
 		}
-		if err := mbkp.ListBackups(cfg, outputFmt); err != nil {
+		if err := mbkp.ListBackups(cmd.Context(), cfg, outputFmt); err != nil {
 			slog.Error("List failed", "error", err)
-			os.Exit(1)
+			return err
 		}
+		return nil
 	},
 }
 
 var restoreCmd = &cobra.Command{
 	Use:   "restore",
 	Short: "Restore a backup to a MariaDB data directory",
-	Run: func(cmd *cobra.Command, args []string) {
+	RunE: func(cmd *cobra.Command, args []string) error {
 		cfg, err := mbkp.LoadConfig(backupDir)
 		if err != nil {
 			slog.Error("Configuration error", "error", err)
-			os.Exit(1)
+			return err
 		}
 		if !prepareOnly && datadir == "" {
 			fmt.Println("Error: --datadir is required unless --prepare-only is set.")
 			_ = cmd.Usage()
-			os.Exit(1)
+			return fmt.Errorf("--datadir is required")
 		}
 		release, err := mbkp.AcquireLock(cfg.BackupDir)
 		if err != nil {
 			slog.Error("Cannot start restore", "error", err)
-			os.Exit(1)
+			return err
 		}
 		defer func() { _ = release() }()
-		if err := mbkp.RestoreBackup(cfg, backupId, datadir, prepareOnly, newServerUUID); err != nil {
+		if err := mbkp.RestoreBackup(cmd.Context(), cfg, backupId, datadir, prepareOnly, newServerUUID); err != nil {
 			slog.Error("Restore failed", "error", err)
-			os.Exit(1)
+			return err
 		}
+		return nil
 	},
 }
 
 var pitrCmd = &cobra.Command{
 	Use:   "pitr",
 	Short: "Perform Point-in-Time Recovery (PITR) to a specific timestamp",
-	Run: func(cmd *cobra.Command, args []string) {
+	RunE: func(cmd *cobra.Command, args []string) error {
 		cfg, err := mbkp.LoadConfig(backupDir)
 		if err != nil {
 			slog.Error("Configuration error", "error", err)
-			os.Exit(1)
+			return err
 		}
 		if targetTime == "" {
 			fmt.Println("Error: --target-time is required.")
 			_ = cmd.Usage()
-			os.Exit(1)
+			return fmt.Errorf("--target-time is required")
 		}
 		if datadir == "" {
 			fmt.Println("Error: --datadir is required.")
 			_ = cmd.Usage()
-			os.Exit(1)
+			return fmt.Errorf("--datadir is required")
 		}
 		parsedTime, err := parseTargetTime(targetTime)
 		if err != nil {
 			slog.Error("Error parsing target-time, must be in RFC3339 format (e.g. 2006-01-02T15:04:05Z or '2006-01-02T15:04:05+05:30') or 'YYYY-MM-DD HH:MM:SS' (interpreted in the local timezone)", "target_time", targetTime)
-			os.Exit(1)
+			return err
 		}
 		release, err := mbkp.AcquireLock(cfg.BackupDir)
 		if err != nil {
 			slog.Error("Cannot start PITR", "error", err)
-			os.Exit(1)
+			return err
 		}
 		defer func() { _ = release() }()
-		if err := mbkp.RunPITR(cfg, parsedTime, datadir, newServerUUID); err != nil {
+		if err := mbkp.RunPITR(cmd.Context(), cfg, parsedTime, datadir, newServerUUID); err != nil {
 			slog.Error("PITR failed", "error", err)
-			os.Exit(1)
+			return err
 		}
+		return nil
 	},
 }
 
@@ -225,27 +237,28 @@ func parseTargetTime(s string) (time.Time, error) {
 var purgeCmd = &cobra.Command{
 	Use:   "purge",
 	Short: "Purge backups and archived binlogs based on a retention policy",
-	Run: func(cmd *cobra.Command, args []string) {
+	RunE: func(cmd *cobra.Command, args []string) error {
 		cfg, err := mbkp.LoadConfig(backupDir)
 		if err != nil {
 			slog.Error("Configuration error", "error", err)
-			os.Exit(1)
+			return err
 		}
 		if retention == "" {
 			fmt.Println("Error: --retention is required.")
 			_ = cmd.Usage()
-			os.Exit(1)
+			return fmt.Errorf("--retention is required")
 		}
 		release, err := mbkp.AcquireLock(cfg.BackupDir)
 		if err != nil {
 			slog.Error("Cannot start purge", "error", err)
-			os.Exit(1)
+			return err
 		}
 		defer func() { _ = release() }()
-		if err := mbkp.PurgeBackups(cfg, retention, dryRun); err != nil {
+		if err := mbkp.PurgeBackups(cmd.Context(), cfg, retention, dryRun); err != nil {
 			slog.Error("Purge failed", "error", err)
-			os.Exit(1)
+			return err
 		}
+		return nil
 	},
 }
 
@@ -289,7 +302,20 @@ func init() {
 }
 
 func main() {
-	if err := rootCmd.Execute(); err != nil {
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
+	go func() {
+		<-ctx.Done()
+		// After the first signal initiates graceful shutdown, deregister the handler
+		// so a second signal immediately terminates via default OS handling.
+		stop()
+	}()
+
+	if err := rootCmd.ExecuteContext(ctx); err != nil {
+		if errors.Is(err, context.Canceled) || errors.Is(ctx.Err(), context.Canceled) {
+			os.Exit(130)
+		}
 		os.Exit(1)
 	}
 }

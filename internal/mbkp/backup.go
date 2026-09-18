@@ -2,6 +2,7 @@ package mbkp
 
 import (
 	"bufio"
+	"context"
 	"fmt"
 	"log/slog"
 	"os"
@@ -134,15 +135,15 @@ func writeCheckpointsDir(dir, content string) error {
 // The decompressor is inferred automatically from the archive's file extension.
 // It runs: <decompressor> -dc <src> | <streamBin> -x -C <destDir>
 // streamBin is either "mbstream" (MariaDB) or "xbstream" (Percona/MySQL).
-func extractArchive(streamBin, src, destDir string) error {
+func extractArchive(ctx context.Context, streamBin, src, destDir string) error {
 	if err := os.MkdirAll(destDir, 0755); err != nil {
 		return fmt.Errorf("failed to create extract directory %s: %w", destDir, err)
 	}
 
 	comp := compressorForArchive(src)
 	decompArgs := append(slices.Clone(comp.DecompressArgs), src)
-	cmdDecomp := exec.Command(comp.Name, decompArgs...)
-	cmdStream := exec.Command(streamBin, "-x", "-C", destDir)
+	cmdDecomp := exec.CommandContext(ctx, comp.Name, decompArgs...)
+	cmdStream := exec.CommandContext(ctx, streamBin, "-x", "-C", destDir)
 
 	pipe, err := cmdDecomp.StdoutPipe()
 	if err != nil {
@@ -166,6 +167,10 @@ func extractArchive(streamBin, src, destDir string) error {
 
 	decompErr := cmdDecomp.Wait()
 	streamErr := cmdStream.Wait()
+
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 
 	if decompErr != nil {
 		return fmt.Errorf("%s exited with error: %w", comp.Name, decompErr)
@@ -354,7 +359,7 @@ func isValidBackupID(id string) bool {
 }
 
 // streamBackup runs: <backupBin> <mariabackupArgs> | <comp> <compressArgs> > <archive>
-func streamBackup(cfg *Config, archive string, comp Compressor, mariabackupArgs []string) error {
+func streamBackup(ctx context.Context, cfg *Config, archive string, comp Compressor, mariabackupArgs []string) error {
 	outFile, err := os.OpenFile(archive, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0600)
 	if err != nil {
 		return fmt.Errorf("failed to create archive file %s: %w", archive, err)
@@ -383,13 +388,13 @@ func streamBackup(cfg *Config, archive string, comp Compressor, mariabackupArgs 
 		mariabackupArgs = append([]string{"--defaults-extra-file=" + tempCnfFile}, mariabackupArgs...)
 	}
 
-	cmdMariabackup := exec.Command(cfg.BackupBin, mariabackupArgs...)
+	cmdMariabackup := exec.CommandContext(ctx, cfg.BackupBin, mariabackupArgs...)
 	if cfg.Password != "" {
 		cmdMariabackup.Env = append(os.Environ(), "MYSQL_PWD="+cfg.Password)
 	}
 	cmdMariabackup.Stderr = os.Stderr
 
-	cmdCompress := exec.Command(comp.Name, comp.CompressArgs...)
+	cmdCompress := exec.CommandContext(ctx, comp.Name, comp.CompressArgs...)
 	pipe, err := cmdMariabackup.StdoutPipe()
 	if err != nil {
 		_ = outFile.Close()
@@ -417,6 +422,11 @@ func streamBackup(cfg *Config, archive string, comp Compressor, mariabackupArgs 
 	compressErr := cmdCompress.Wait()
 	_ = outFile.Close()
 
+	if err := ctx.Err(); err != nil {
+		_ = os.Remove(archive)
+		return err
+	}
+
 	if mariabackupErr != nil {
 		_ = os.Remove(archive)
 		return fmt.Errorf("%s failed: %w", cfg.BackupBin, mariabackupErr)
@@ -428,7 +438,11 @@ func streamBackup(cfg *Config, archive string, comp Compressor, mariabackupArgs 
 	return nil
 }
 
-func RunFullBackup(cfg *Config) error {
+func RunFullBackup(ctx context.Context, cfg *Config) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+
 	comp := detectCompressor()
 
 	backupID := newBackupID("full_")
@@ -473,7 +487,7 @@ func RunFullBackup(cfg *Config) error {
 	}
 	args = append(args, cfg.GetCommonArgs()...)
 
-	if err := streamBackup(cfg, archive, comp, args); err != nil {
+	if err := streamBackup(ctx, cfg, archive, comp, args); err != nil {
 		meta.Status = "failed"
 		meta.EndTime = time.Now()
 		_ = UpdateBackup(cfg.BackupDir, meta)
@@ -497,7 +511,11 @@ func RunFullBackup(cfg *Config) error {
 	return nil
 }
 
-func RunIncrementalBackup(cfg *Config, parentID string) error {
+func RunIncrementalBackup(ctx context.Context, cfg *Config, parentID string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+
 	var parentBackup *BackupMetadata
 	var err error
 
@@ -593,7 +611,7 @@ func RunIncrementalBackup(cfg *Config, parentID string) error {
 	}
 	args = append(args, cfg.GetCommonArgs()...)
 
-	if err := streamBackup(cfg, archive, comp, args); err != nil {
+	if err := streamBackup(ctx, cfg, archive, comp, args); err != nil {
 		meta.Status = "failed"
 		meta.EndTime = time.Now()
 		_ = UpdateBackup(cfg.BackupDir, meta)

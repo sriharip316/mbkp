@@ -1,6 +1,7 @@
 package mbkp
 
 import (
+	"context"
 	"crypto/rand"
 	"crypto/rsa"
 	"crypto/x509"
@@ -249,9 +250,27 @@ func TestConnectDBError(t *testing.T) {
 		Host:     "127.0.0.1",
 		Port:     1, // reserved port, connection will fail
 	}
-	_, err := cfg.ConnectDB()
+	_, err := cfg.ConnectDB(context.Background())
 	if err == nil {
 		t.Error("expected error when trying to connect to an invalid port")
+	}
+}
+
+func TestConnectDBCanceledContext(t *testing.T) {
+	cfg := &Config{
+		User:     "root",
+		Password: "pw",
+		Host:     "127.0.0.1",
+		Port:     3306,
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // pre-cancel context
+	_, err := cfg.ConnectDB(ctx)
+	if err == nil {
+		t.Fatal("expected error with pre-canceled context")
+	}
+	if !strings.Contains(err.Error(), "context canceled") {
+		t.Errorf("expected error to mention context canceled, got: %v", err)
 	}
 }
 

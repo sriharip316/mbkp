@@ -1,6 +1,7 @@
 package mbkp
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -11,7 +12,11 @@ import (
 )
 
 // ListBackups prints all backups in the requested output format ("table" or "json").
-func ListBackups(cfg *Config, format string) error {
+func ListBackups(ctx context.Context, cfg *Config, format string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+
 	meta, err := LoadMetadata(cfg.BackupDir)
 	if err != nil {
 		return fmt.Errorf("failed to load backup metadata: %w", err)

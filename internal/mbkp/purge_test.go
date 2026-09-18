@@ -1,6 +1,7 @@
 package mbkp
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"strings"
@@ -183,7 +184,7 @@ func TestPurgeBackups(t *testing.T) {
 	}
 
 	// 2. Perform a dry-run purge first and verify nothing is actually deleted
-	err = PurgeBackups(cfg, "5d", true)
+	err = PurgeBackups(context.Background(), cfg, "5d", true)
 	if err != nil {
 		t.Fatalf("dry-run purge failed: %v", err)
 	}
@@ -207,7 +208,7 @@ func TestPurgeBackups(t *testing.T) {
 	}
 
 	// 3. Perform the actual purge with 5 days retention
-	err = PurgeBackups(cfg, "5d", false)
+	err = PurgeBackups(context.Background(), cfg, "5d", false)
 	if err != nil {
 		t.Fatalf("actual purge failed: %v", err)
 	}
@@ -289,7 +290,7 @@ func TestPurgeBackups(t *testing.T) {
 	// - full_old metadata will be removed immediately during external deletion scan.
 	// - inc_old and inc_new will fail lineage checks because their ancestor full_old is missing.
 	// - As a result, all of them will be purged.
-	err = PurgeBackups(cfg, "5d", false)
+	err = PurgeBackups(context.Background(), cfg, "5d", false)
 	if err != nil {
 		t.Fatalf("purge after external deletion failed: %v", err)
 	}
@@ -355,13 +356,25 @@ func TestPurgeBackups_OldestKeptBackupNoBinlog(t *testing.T) {
 	}
 
 	// Purge with 2-day retention
-	if err := PurgeBackups(cfg, "2d", false); err != nil {
+	if err := PurgeBackups(context.Background(), cfg, "2d", false); err != nil {
 		t.Fatalf("PurgeBackups failed: %v", err)
 	}
 
 	// The binlog MUST be retained because oldestKeptBackup has an unknown binlog boundary
 	if _, err := os.Stat(binlogFile); os.IsNotExist(err) {
 		t.Errorf("expected expired binlog to be retained when oldest kept backup has no BinlogFile, but it was deleted")
+	}
+}
+
+func TestPurgeBackupsCanceledContext(t *testing.T) {
+	tmpDir := t.TempDir()
+	cfg := &Config{BackupDir: tmpDir}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	err := PurgeBackups(ctx, cfg, "7d", false)
+	if err == nil {
+		t.Fatal("expected PurgeBackups with canceled context to fail")
 	}
 }
 

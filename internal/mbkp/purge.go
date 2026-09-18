@@ -1,6 +1,7 @@
 package mbkp
 
 import (
+	"context"
 	"fmt"
 	"log/slog"
 	"math"
@@ -83,7 +84,11 @@ func resolveChainInMemory(backupMap map[string]BackupMetadata, targetID string) 
 }
 
 // PurgeBackups scans backups, cleans up missing ones, applies the retention policy, and deletes expired files/metadata.
-func PurgeBackups(cfg *Config, retentionStr string, dryRun bool) error {
+func PurgeBackups(ctx context.Context, cfg *Config, retentionStr string, dryRun bool) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+
 	retention, err := ParseRetentionDuration(retentionStr)
 	if err != nil {
 		return fmt.Errorf("failed to parse retention duration %q: %w", retentionStr, err)
@@ -100,6 +105,10 @@ func PurgeBackups(cfg *Config, retentionStr string, dryRun bool) error {
 	// 1. External Deletion Scan: Check if backup files are deleted outside mbkp
 	var activeBackups []BackupMetadata
 	for _, b := range metaData.Backups {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+
 		archivePath := filepath.Join(cfg.BackupDir, b.Path)
 		if _, err := os.Stat(archivePath); os.IsNotExist(err) {
 			if dryRun {
@@ -125,6 +134,10 @@ func PurgeBackups(cfg *Config, retentionStr string, dryRun bool) error {
 	keepIDs := make(map[string]bool)
 
 	for _, b := range activeBackups {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+
 		if b.Status == "completed" {
 			// Check if the backup itself is within the retention window
 			if !b.EndTime.Before(cutoff) {
@@ -148,6 +161,10 @@ func PurgeBackups(cfg *Config, retentionStr string, dryRun bool) error {
 
 	// 3. Purge backups that should not be kept
 	for _, b := range metaData.Backups {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+
 		if keepIDs[b.ID] {
 			continue
 		}
@@ -201,6 +218,10 @@ func PurgeBackups(cfg *Config, retentionStr string, dryRun bool) error {
 	}
 
 	for _, entry := range entries {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+
 		if entry.IsDir() || !isBinlogFile(entry.Name()) {
 			continue
 		}

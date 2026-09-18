@@ -1,6 +1,7 @@
 package mbkp
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"strings"
@@ -154,15 +155,15 @@ func TestBackupIDValidation(t *testing.T) {
 	}
 
 	cfg := &Config{BackupDir: t.TempDir()}
-	if err := RestoreBackup(cfg, "../../bad", "/tmp/datadir", false, false); err == nil || !strings.Contains(err.Error(), "invalid backup ID") {
+	if err := RestoreBackup(context.Background(), cfg, "../../bad", "/tmp/datadir", false, false); err == nil || !strings.Contains(err.Error(), "invalid backup ID") {
 		t.Errorf("RestoreBackup with invalid ID expected error, got %v", err)
 	}
 
-	if _, err := PrepareChain(cfg, "../../bad"); err == nil || !strings.Contains(err.Error(), "invalid backup ID") {
+	if _, err := PrepareChain(context.Background(), cfg, "../../bad"); err == nil || !strings.Contains(err.Error(), "invalid backup ID") {
 		t.Errorf("PrepareChain with invalid ID expected error, got %v", err)
 	}
 
-	if err := RunIncrementalBackup(cfg, "../../bad"); err == nil || !strings.Contains(err.Error(), "invalid parent backup ID") {
+	if err := RunIncrementalBackup(context.Background(), cfg, "../../bad"); err == nil || !strings.Contains(err.Error(), "invalid parent backup ID") {
 		t.Errorf("RunIncrementalBackup with invalid parent ID expected error, got %v", err)
 	}
 }
@@ -194,7 +195,7 @@ func TestPrepareChainCleansUpOnFailure(t *testing.T) {
 
 	prepareDir := filepath.Join(tmpDir, "prepare_"+b.ID)
 
-	_, err := PrepareChain(cfg, b.ID)
+	_, err := PrepareChain(context.Background(), cfg, b.ID)
 	if err == nil {
 		t.Fatal("expected PrepareChain to fail, but got nil")
 	}
@@ -214,7 +215,7 @@ func TestRestoreBackupDatadirFailFast(t *testing.T) {
 	}
 
 	// Empty datadir parameter
-	if err := RestoreBackup(cfg, "valid-id", "", false, false); err == nil || !strings.Contains(err.Error(), "datadir must be specified") {
+	if err := RestoreBackup(context.Background(), cfg, "valid-id", "", false, false); err == nil || !strings.Contains(err.Error(), "datadir must be specified") {
 		t.Errorf("RestoreBackup with empty datadir expected error, got %v", err)
 	}
 
@@ -225,7 +226,7 @@ func TestRestoreBackupDatadirFailFast(t *testing.T) {
 	}
 
 	// Should fail fast before even looking for backup tools or resolving backup
-	err := RestoreBackup(cfg, "valid-id", dataDir, false, false)
+	err := RestoreBackup(context.Background(), cfg, "valid-id", dataDir, false, false)
 	if err == nil || !strings.Contains(err.Error(), "is not empty") {
 		t.Errorf("RestoreBackup with non-empty datadir expected error about not empty, got %v", err)
 	}
@@ -235,8 +236,30 @@ func TestRestoreBackupDatadirFailFast(t *testing.T) {
 	if err := os.WriteFile(filePath, []byte("data"), 0644); err != nil {
 		t.Fatalf("failed to write file: %v", err)
 	}
-	err = RestoreBackup(cfg, "valid-id", filePath, false, false)
+	err = RestoreBackup(context.Background(), cfg, "valid-id", filePath, false, false)
 	if err == nil || !strings.Contains(err.Error(), "is not a directory") {
 		t.Errorf("RestoreBackup with file datadir expected 'not a directory' error, got %v", err)
+	}
+}
+
+func TestRestoreBackupCanceledContext(t *testing.T) {
+	cfg := &Config{BackupDir: t.TempDir()}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	err := RestoreBackup(ctx, cfg, "valid-id", "/tmp/nonexistent", false, false)
+	if err == nil {
+		t.Fatal("expected RestoreBackup with canceled context to fail")
+	}
+}
+
+func TestPrepareChainCanceledContext(t *testing.T) {
+	cfg := &Config{BackupDir: t.TempDir()}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	_, err := PrepareChain(ctx, cfg, "valid-id")
+	if err == nil {
+		t.Fatal("expected PrepareChain with canceled context to fail")
 	}
 }

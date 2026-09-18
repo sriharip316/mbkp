@@ -1,6 +1,7 @@
 package mbkp
 
 import (
+	"context"
 	"database/sql"
 	"fmt"
 	"log/slog"
@@ -10,8 +11,12 @@ import (
 )
 
 // BackupBinlogs connects to the database, flushes logs, and copies all closed binary logs to the archive directory
-func BackupBinlogs(cfg *Config) error {
-	db, err := cfg.ConnectDB()
+func BackupBinlogs(ctx context.Context, cfg *Config) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+
+	db, err := cfg.ConnectDB(ctx)
 	if err != nil {
 		return fmt.Errorf("failed to connect to database: %w", err)
 	}
@@ -19,7 +24,7 @@ func BackupBinlogs(cfg *Config) error {
 
 	// 1. Check if binlog is enabled
 	var varName, logBinVal string
-	err = db.QueryRow("SHOW VARIABLES LIKE 'log_bin'").Scan(&varName, &logBinVal)
+	err = db.QueryRowContext(ctx, "SHOW VARIABLES LIKE 'log_bin'").Scan(&varName, &logBinVal)
 	if err != nil {
 		return fmt.Errorf("failed to query log_bin status: %w", err)
 	}
@@ -29,21 +34,21 @@ func BackupBinlogs(cfg *Config) error {
 
 	// 2. Flush binary logs to close the current active one and open a new one
 	slog.Info("Flushing binary logs on MariaDB server...")
-	_, err = db.Exec("FLUSH BINARY LOGS")
+	_, err = db.ExecContext(ctx, "FLUSH BINARY LOGS")
 	if err != nil {
 		return fmt.Errorf("failed to execute FLUSH BINARY LOGS: %w", err)
 	}
 
 	// 3. Get log_bin_basename to locate the binlog files on disk
 	var logBinBasename string
-	err = db.QueryRow("SHOW VARIABLES LIKE 'log_bin_basename'").Scan(&varName, &logBinBasename)
+	err = db.QueryRowContext(ctx, "SHOW VARIABLES LIKE 'log_bin_basename'").Scan(&varName, &logBinBasename)
 	if err != nil {
 		return fmt.Errorf("failed to query log_bin_basename: %w", err)
 	}
 	sourceDir := filepath.Dir(logBinBasename)
 
 	// 4. Retrieve list of all binary logs
-	rows, err := db.Query("SHOW BINARY LOGS")
+	rows, err := db.QueryContext(ctx, "SHOW BINARY LOGS")
 	if err != nil {
 		return fmt.Errorf("failed to retrieve list of binary logs: %w", err)
 	}
@@ -76,6 +81,10 @@ func BackupBinlogs(cfg *Config) error {
 	slog.Info("Archiving binlog files", "count", len(binlogs), "source_dir", sourceDir, "dest_dir", binlogsBackupDir)
 
 	for _, binlog := range binlogs {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+
 		srcPath := filepath.Join(sourceDir, binlog.LogName)
 		dstPath := filepath.Join(binlogsBackupDir, binlog.LogName+ext)
 
@@ -90,7 +99,7 @@ func BackupBinlogs(cfg *Config) error {
 		// killed run never leaves a truncated archive that later runs would
 		// skip as "already archived".
 		tmpPath := dstPath + ".part"
-		if err := compressAndCopyFile(srcPath, tmpPath, comp); err != nil {
+		if err := compressAndCopyFile(ctx, srcPath, tmpPath, comp); err != nil {
 			_ = os.Remove(tmpPath)
 			return fmt.Errorf("failed to archive binlog file %s: %w", binlog.LogName, err)
 		}
@@ -142,7 +151,7 @@ func scanBinaryLogs(rows *sql.Rows) ([]binlogFileInfo, error) {
 	return binlogs, nil
 }
 
-func compressAndCopyFile(src, dst string, comp Compressor) error {
+func compressAndCopyFile(ctx context.Context, src, dst string, comp Compressor) error {
 	inFile, err := os.Open(src)
 	if err != nil {
 		return err
@@ -155,7 +164,7 @@ func compressAndCopyFile(src, dst string, comp Compressor) error {
 	}
 	defer func() { _ = outFile.Close() }()
 
-	cmdCompress := exec.Command(comp.Name, comp.CompressArgs...)
+	cmdCompress := exec.CommandContext(ctx, comp.Name, comp.CompressArgs...)
 	cmdCompress.Stdin = inFile
 	cmdCompress.Stdout = outFile
 	cmdCompress.Stderr = os.Stderr

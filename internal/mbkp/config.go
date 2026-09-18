@@ -1,6 +1,7 @@
 package mbkp
 
 import (
+	"context"
 	"crypto/tls"
 	"crypto/x509"
 	"database/sql"
@@ -200,7 +201,7 @@ func (c *Config) GetDSN() (string, error) {
 }
 
 // ConnectDB establishes a connection to the database
-func (c *Config) ConnectDB() (*sql.DB, error) {
+func (c *Config) ConnectDB(ctx context.Context) (*sql.DB, error) {
 	dsn, err := c.GetDSN()
 	if err != nil {
 		return nil, err
@@ -209,7 +210,7 @@ func (c *Config) ConnectDB() (*sql.DB, error) {
 	if err != nil {
 		return nil, fmt.Errorf("failed to open database connection: %w", err)
 	}
-	if err := db.Ping(); err != nil {
+	if err := db.PingContext(ctx); err != nil {
 		_ = db.Close()
 		return nil, fmt.Errorf("failed to ping database: %w", err)
 	}

@@ -2,6 +2,7 @@ package mbkp
 
 import (
 	"bytes"
+	"context"
 	"io"
 	"os"
 	"strings"
@@ -92,7 +93,7 @@ func TestListBackups(t *testing.T) {
 
 	// JSON output
 	outJSON, err := captureStdout(func() error {
-		return ListBackups(cfg, "json")
+		return ListBackups(context.Background(), cfg, "json")
 	})
 	if err != nil {
 		t.Fatalf("ListBackups JSON failed: %v", err)
@@ -103,7 +104,7 @@ func TestListBackups(t *testing.T) {
 
 	// Table output
 	outTable, err := captureStdout(func() error {
-		return ListBackups(cfg, "table")
+		return ListBackups(context.Background(), cfg, "table")
 	})
 	if err != nil {
 		t.Fatalf("ListBackups table failed: %v", err)
@@ -118,12 +119,24 @@ func TestListBackups(t *testing.T) {
 		BackupDir: tmpDir2,
 	}
 	outEmpty, err := captureStdout(func() error {
-		return ListBackups(cfg2, "table")
+		return ListBackups(context.Background(), cfg2, "table")
 	})
 	if err != nil {
 		t.Fatalf("ListBackups empty failed: %v", err)
 	}
 	if !strings.Contains(outEmpty, "No backups found.") {
 		t.Errorf("expected empty table message, got %q", outEmpty)
+	}
+}
+
+func TestListBackupsCanceledContext(t *testing.T) {
+	tmpDir := t.TempDir()
+	cfg := &Config{BackupDir: tmpDir}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	err := ListBackups(ctx, cfg, "table")
+	if err == nil {
+		t.Fatal("expected ListBackups with canceled context to fail")
 	}
 }

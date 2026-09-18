@@ -1,8 +1,11 @@
 package main
 
 import (
+	"context"
 	"testing"
 	"time"
+
+	"github.com/srihari/mbkp/internal/mbkp"
 )
 
 func TestParseTargetTimeRFC3339(t *testing.T) {
@@ -38,5 +41,33 @@ func TestParseTargetTimeInvalid(t *testing.T) {
 		if _, err := parseTargetTime(s); err == nil {
 			t.Errorf("parseTargetTime(%q) succeeded, want error", s)
 		}
+	}
+}
+
+func TestRootCmdExecutionWithCanceledContext(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	tmpDir := t.TempDir()
+	rootCmd.SetArgs([]string{"--backup-dir", tmpDir, "backup", "full"})
+
+	err := rootCmd.ExecuteContext(ctx)
+	if err == nil {
+		t.Fatal("expected ExecuteContext with canceled context to return error")
+	}
+
+	// Verify lock was released and can be acquired immediately
+	release, err := mbkp.AcquireLock(tmpDir)
+	if err != nil {
+		t.Fatalf("expected lock to be released after cancellation, but failed to acquire: %v", err)
+	}
+	_ = release()
+}
+
+func TestBackupCmdRequiresSubcommand(t *testing.T) {
+	rootCmd.SetArgs([]string{"backup"})
+	err := rootCmd.ExecuteContext(context.Background())
+	if err == nil {
+		t.Fatal("expected 'mbkp backup' without subcommand to return error")
 	}
 }

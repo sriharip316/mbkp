@@ -1,6 +1,7 @@
 package mbkp
 
 import (
+	"context"
 	"fmt"
 	"log/slog"
 	"os"
@@ -67,7 +68,11 @@ func getBinlogFilesToApply(binlogsDir string, startFile string) ([]string, error
 	return filtered, nil
 }
 
-func RunPITR(cfg *Config, targetTime time.Time, datadir string, newServerUUID bool) error {
+func RunPITR(ctx context.Context, cfg *Config, targetTime time.Time, datadir string, newServerUUID bool) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+
 	slog.Info("Starting PITR recovery", "target_time", targetTime.Format(time.RFC3339))
 
 	// 1. Find the latest completed backup before the target time
@@ -101,7 +106,7 @@ func RunPITR(cfg *Config, targetTime time.Time, datadir string, newServerUUID bo
 	// also re-establishes the backed-up server-uuid via auto.cnf (unless
 	// newServerUUID is set), so the recovery daemon — and any server started
 	// on this datadir afterwards — continues the original GTID identity.
-	if err := RestoreBackup(cfg, baseBackup.ID, datadir, false, newServerUUID); err != nil {
+	if err := RestoreBackup(ctx, cfg, baseBackup.ID, datadir, false, newServerUUID); err != nil {
 		return fmt.Errorf("failed to restore base backup for PITR: %w", err)
 	}
 
@@ -114,7 +119,7 @@ func RunPITR(cfg *Config, targetTime time.Time, datadir string, newServerUUID bo
 	// If running as root, make sure the mysql user owns the datadir
 	if os.Getuid() == 0 {
 		slog.Info("Running as root, changing ownership of datadir to mysql...", "datadir", datadir)
-		chownCmd := exec.Command("chown", "-R", "mysql:mysql", datadir)
+		chownCmd := exec.CommandContext(ctx, "chown", "-R", "mysql:mysql", datadir)
 		if err := chownCmd.Run(); err != nil {
 			slog.Warn("Failed to chown datadir to mysql:mysql", "error", err)
 		}
@@ -132,7 +137,7 @@ func RunPITR(cfg *Config, targetTime time.Time, datadir string, newServerUUID bo
 		// Ensure socket directory exists
 		socketDir := filepath.Dir(cfg.Socket)
 		if err := os.MkdirAll(socketDir, 0755); err == nil && os.Getuid() == 0 {
-			_ = exec.Command("chown", "mysql:mysql", socketDir).Run()
+			_ = exec.CommandContext(ctx, "chown", "mysql:mysql", socketDir).Run()
 		}
 		daemonArgs = append(daemonArgs, "--socket="+cfg.Socket)
 		daemonArgs = append(daemonArgs, "--skip-networking")
@@ -157,7 +162,11 @@ func RunPITR(cfg *Config, targetTime time.Time, datadir string, newServerUUID bo
 	}
 	defer func() { _ = logFile.Close() }()
 
-	cmdDaemon := exec.Command(binary, daemonArgs...)
+	cmdDaemon := exec.CommandContext(ctx, binary, daemonArgs...)
+	cmdDaemon.Cancel = func() error {
+		return cmdDaemon.Process.Signal(syscall.SIGTERM)
+	}
+	cmdDaemon.WaitDelay = 10 * time.Second
 	cmdDaemon.Stdout = logFile
 	cmdDaemon.Stderr = logFile
 
@@ -186,7 +195,12 @@ func RunPITR(cfg *Config, targetTime time.Time, datadir string, newServerUUID bo
 	connected := false
 	var dbErr error
 	for i := range 24 { // 24 * 5s = 120s
-		db, err := cfg.ConnectDB()
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		default:
+		}
+		db, err := cfg.ConnectDB(ctx)
 		if err == nil {
 			_ = db.Close()
 			connected = true
@@ -194,7 +208,11 @@ func RunPITR(cfg *Config, targetTime time.Time, datadir string, newServerUUID bo
 		}
 		dbErr = err
 		slog.Info("Waiting for MariaDB server to start", "iteration", i+1, "max_iterations", 24)
-		time.Sleep(5 * time.Second)
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(5 * time.Second):
+		}
 	}
 
 	if !connected {
@@ -242,11 +260,14 @@ func RunPITR(cfg *Config, targetTime time.Time, datadir string, newServerUUID bo
 
 	var decompressedFiles []string
 	for _, compressedPath := range binlogsToApply {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		filename := filepath.Base(compressedPath)
 		baseName := binlogBaseName(filename)
 		decompressedPath := filepath.Join(tmpBinlogDir, baseName)
 
-		if err := decompressFile(compressedPath, decompressedPath); err != nil {
+		if err := decompressFile(ctx, compressedPath, decompressedPath); err != nil {
 			return fmt.Errorf("failed to decompress binlog file %s: %w", filename, err)
 		}
 		decompressedFiles = append(decompressedFiles, decompressedPath)
@@ -276,8 +297,8 @@ func RunPITR(cfg *Config, targetTime time.Time, datadir string, newServerUUID bo
 
 	mariadbArgs := cfg.GetCommonArgs()
 
-	cmdBinlog := exec.Command(cfg.BinlogBin, binlogArgs...)
-	cmdMariaDB := exec.Command(cfg.ClientBin, mariadbArgs...)
+	cmdBinlog := exec.CommandContext(ctx, cfg.BinlogBin, binlogArgs...)
+	cmdMariaDB := exec.CommandContext(ctx, cfg.ClientBin, mariadbArgs...)
 	if cfg.Password != "" {
 		cmdMariaDB.Env = append(os.Environ(), "MYSQL_PWD="+cfg.Password)
 	}
@@ -320,7 +341,7 @@ func RunPITR(cfg *Config, targetTime time.Time, datadir string, newServerUUID bo
 	return nil
 }
 
-func decompressFile(src, dst string) error {
+func decompressFile(ctx context.Context, src, dst string) error {
 	comp := compressorForArchive(src)
 	outFile, err := os.OpenFile(dst, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0600)
 	if err != nil {
@@ -329,7 +350,7 @@ func decompressFile(src, dst string) error {
 	defer func() { _ = outFile.Close() }()
 
 	decompArgs := append(slices.Clone(comp.DecompressArgs), src)
-	cmdDecomp := exec.Command(comp.Name, decompArgs...)
+	cmdDecomp := exec.CommandContext(ctx, comp.Name, decompArgs...)
 	cmdDecomp.Stdout = outFile
 	cmdDecomp.Stderr = os.Stderr
 

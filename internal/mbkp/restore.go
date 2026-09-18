@@ -1,6 +1,7 @@
 package mbkp
 
 import (
+	"context"
 	"fmt"
 	"log/slog"
 	"os"
@@ -11,7 +12,11 @@ import (
 
 // PrepareChain resolves the backup lineage for backupID, extracts and prepares the backup chain,
 // and returns the path to the prepared directory ready for copy-back.
-func PrepareChain(cfg *Config, backupID string) (string, error) {
+func PrepareChain(ctx context.Context, cfg *Config, backupID string) (string, error) {
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
+
 	if backupID != "" && !isValidBackupID(backupID) {
 		return "", fmt.Errorf("invalid backup ID %q", backupID)
 	}
@@ -50,7 +55,7 @@ func PrepareChain(cfg *Config, backupID string) (string, error) {
 	fullBackup := chain[0]
 	fullArchive := filepath.Join(cfg.BackupDir, fullBackup.Path)
 	slog.Info("Extracting base full backup to prepare directory", "id", fullBackup.ID, "prepare_dir", prepareDir)
-	if err := extractArchive(cfg.StreamBin, fullArchive, prepareDir); err != nil {
+	if err := extractArchive(ctx, cfg.StreamBin, fullArchive, prepareDir); err != nil {
 		return "", fmt.Errorf("failed to extract full backup archive: %w", err)
 	}
 
@@ -69,7 +74,7 @@ func PrepareChain(cfg *Config, backupID string) (string, error) {
 	if len(chain) == 1 {
 		slog.Info("Preparing base full backup...")
 		args := []string{"--prepare", "--target-dir=" + prepareDir}
-		cmd := exec.Command(cfg.BackupBin, args...)
+		cmd := exec.CommandContext(ctx, cfg.BackupBin, args...)
 		cmd.Stdout = os.Stdout
 		cmd.Stderr = os.Stderr
 		slog.Info("Running command", "command", cfg.BackupBin, "args", args)
@@ -84,7 +89,7 @@ func PrepareChain(cfg *Config, backupID string) (string, error) {
 		}
 		args = append(args, "--target-dir="+prepareDir)
 
-		cmd := exec.Command(cfg.BackupBin, args...)
+		cmd := exec.CommandContext(ctx, cfg.BackupBin, args...)
 		cmd.Stdout = os.Stdout
 		cmd.Stderr = os.Stderr
 		slog.Info("Running command", "command", cfg.BackupBin, "args", args)
@@ -94,6 +99,10 @@ func PrepareChain(cfg *Config, backupID string) (string, error) {
 
 		// Apply incremental backups
 		for i := 1; i < len(chain); i++ {
+			if err := ctx.Err(); err != nil {
+				return "", err
+			}
+
 			inc := chain[i]
 			incArchive := filepath.Join(cfg.BackupDir, inc.Path)
 
@@ -106,7 +115,7 @@ func PrepareChain(cfg *Config, backupID string) (string, error) {
 			if err := os.RemoveAll(tempIncDir); err != nil {
 				return "", fmt.Errorf("failed to clean temporary incremental directory: %w", err)
 			}
-			if err := extractArchive(cfg.StreamBin, incArchive, tempIncDir); err != nil {
+			if err := extractArchive(ctx, cfg.StreamBin, incArchive, tempIncDir); err != nil {
 				return "", fmt.Errorf("failed to extract incremental archive %s: %w", inc.ID, err)
 			}
 			tempDirs = append(tempDirs, tempIncDir)
@@ -118,7 +127,7 @@ func PrepareChain(cfg *Config, backupID string) (string, error) {
 			}
 			args = append(args, "--target-dir="+prepareDir, "--incremental-dir="+tempIncDir)
 
-			cmd := exec.Command(cfg.BackupBin, args...)
+			cmd := exec.CommandContext(ctx, cfg.BackupBin, args...)
 			cmd.Stdout = os.Stdout
 			cmd.Stderr = os.Stderr
 			slog.Info("Running command", "command", cfg.BackupBin, "args", args)
@@ -127,9 +136,13 @@ func PrepareChain(cfg *Config, backupID string) (string, error) {
 			}
 		}
 
+		if err := ctx.Err(); err != nil {
+			return "", err
+		}
+
 		slog.Info("Finalizing prepare (rolling back uncommitted transactions)...")
 		argsFinal := []string{"--prepare", "--target-dir=" + prepareDir}
-		cmdFinal := exec.Command(cfg.BackupBin, argsFinal...)
+		cmdFinal := exec.CommandContext(ctx, cfg.BackupBin, argsFinal...)
 		cmdFinal.Stdout = os.Stdout
 		cmdFinal.Stderr = os.Stderr
 		slog.Info("Running command", "command", cfg.BackupBin, "args", argsFinal)
@@ -250,7 +263,11 @@ func restoreServerUUID(cfg *Config, prepareDir, datadir string, newServerUUID bo
 	return nil
 }
 
-func RestoreBackup(cfg *Config, backupID string, datadir string, prepareOnly bool, newServerUUID bool) error {
+func RestoreBackup(ctx context.Context, cfg *Config, backupID string, datadir string, prepareOnly bool, newServerUUID bool) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+
 	if backupID != "" && !isValidBackupID(backupID) {
 		return fmt.Errorf("invalid backup ID %q", backupID)
 	}
@@ -292,7 +309,7 @@ func RestoreBackup(cfg *Config, backupID string, datadir string, prepareOnly boo
 	}
 
 	// 1. Prepare the database files
-	prepareDir, err := PrepareChain(cfg, backupID)
+	prepareDir, err := PrepareChain(ctx, cfg, backupID)
 	if err != nil {
 		return err
 	}
@@ -308,6 +325,10 @@ func RestoreBackup(cfg *Config, backupID string, datadir string, prepareOnly boo
 		_ = os.RemoveAll(prepareDir)
 	}()
 
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+
 	// 2. Perform copy-back
 	slog.Info("Restoring prepared files to data directory", "prepare_dir", prepareDir, "datadir", datadir)
 
@@ -319,7 +340,7 @@ func RestoreBackup(cfg *Config, backupID string, datadir string, prepareOnly boo
 	}
 
 	args := []string{"--copy-back", "--target-dir=" + prepareDir, "--datadir=" + datadir}
-	cmd := exec.Command(cfg.BackupBin, args...)
+	cmd := exec.CommandContext(ctx, cfg.BackupBin, args...)
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 
