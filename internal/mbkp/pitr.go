@@ -68,6 +68,15 @@ func getBinlogFilesToApply(binlogsDir string, startFile string) ([]string, error
 	return filtered, nil
 }
 
+const (
+	// pitrConnectTimeout bounds a single readiness connect attempt so one hung
+	// handshake cannot stretch the poll loop beyond its overall budget.
+	pitrConnectTimeout = 10 * time.Second
+	// daemonStopTimeout is how long the deferred shutdown waits after
+	// SIGTERM before escalating to SIGKILL.
+	daemonStopTimeout = 15 * time.Second
+)
+
 func RunPITR(ctx context.Context, cfg *Config, targetTime time.Time, datadir string, newServerUUID bool) error {
 	if err := ctx.Err(); err != nil {
 		return err
@@ -175,19 +184,55 @@ func RunPITR(ctx context.Context, cfg *Config, targetTime time.Time, datadir str
 		return fmt.Errorf("failed to start temporary database server: %w", err)
 	}
 
-	// Defer stopping the database server cleanly
+	// The watcher goroutine is the sole owner of cmdDaemon.Wait(): it reaps
+	// the process exactly once and closes daemonExited so any number of
+	// waiters (readiness poll, deferred shutdown) can observe the exit.
+	// daemonErr is only read after daemonExited has closed, which gives the
+	// necessary happens-before edge over the goroutine's write.
+	daemonExited := make(chan struct{})
+	var daemonErr error
+	go func() {
+		daemonErr = cmdDaemon.Wait()
+		close(daemonExited)
+	}()
+
+	// daemonDied reports a daemon that exited during the readiness poll. A
+	// daemon that dies this early (bad datadir permissions are the classic
+	// cause) can never become connectable, so the poll aborts immediately
+	// instead of waiting out its full timeout. A clean exit (nil error)
+	// during startup is still a failure.
+	daemonDied := func() error {
+		status := "exit status 0"
+		if daemonErr != nil {
+			status = daemonErr.Error()
+		}
+		return fmt.Errorf("temporary database server exited during startup (%s); check the recovery log at %s", status, logFilePath)
+	}
+
+	// Defer stopping the database server cleanly. The watcher goroutine
+	// performs the actual reaping; a daemon that ignores SIGTERM is killed
+	// after daemonStopTimeout instead of blocking RunPITR forever.
 	defer func() {
 		slog.Info("Stopping temporary database server...")
 		if cmdDaemon.Process != nil {
+			// A failed signal usually means the process already exited and
+			// was reaped by the watcher goroutine; a live-but-ignoring
+			// daemon is handled by the kill fallback below.
 			if err := cmdDaemon.Process.Signal(syscall.SIGTERM); err != nil {
-				slog.Warn("Failed to send SIGTERM to database server, attempting SIGKILL", "error", err)
-				_ = cmdDaemon.Process.Kill()
+				slog.Info("SIGTERM to database server failed; it likely already stopped", "error", err)
 			}
-			if err := cmdDaemon.Wait(); err != nil {
-				slog.Info("Database server stopped", "status", err.Error())
-			} else {
-				slog.Info("Database server stopped cleanly")
-			}
+		}
+		select {
+		case <-daemonExited:
+		case <-time.After(daemonStopTimeout):
+			slog.Warn("Database server did not stop in time, sending SIGKILL", "timeout", daemonStopTimeout)
+			_ = cmdDaemon.Process.Kill()
+			<-daemonExited
+		}
+		if daemonErr != nil {
+			slog.Info("Database server stopped", "status", daemonErr.Error())
+		} else {
+			slog.Info("Database server stopped cleanly")
 		}
 	}()
 
@@ -198,9 +243,13 @@ func RunPITR(ctx context.Context, cfg *Config, targetTime time.Time, datadir str
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
+		case <-daemonExited:
+			return daemonDied()
 		default:
 		}
-		db, err := cfg.ConnectDB(ctx)
+		attemptCtx, cancel := context.WithTimeout(ctx, pitrConnectTimeout)
+		db, err := cfg.ConnectDB(attemptCtx)
+		cancel()
 		if err == nil {
 			_ = db.Close()
 			connected = true
@@ -211,6 +260,8 @@ func RunPITR(ctx context.Context, cfg *Config, targetTime time.Time, datadir str
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
+		case <-daemonExited:
+			return daemonDied()
 		case <-time.After(5 * time.Second):
 		}
 	}

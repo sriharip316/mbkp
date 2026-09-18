@@ -69,7 +69,7 @@ func TestGetDSN(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	expected := "root:pw@tcp(127.0.0.1:3306)/"
+	expected := "root:pw@tcp(127.0.0.1:3306)/?readTimeout=30s&timeout=5s"
 	if dsn != expected {
 		t.Errorf("expected %q, got %q", expected, dsn)
 	}
@@ -83,7 +83,7 @@ func TestGetDSN(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	expectedSocket := "root:pw@unix(/tmp/mysql.sock)/"
+	expectedSocket := "root:pw@unix(/tmp/mysql.sock)/?readTimeout=30s&timeout=5s"
 	if dsnSocket != expectedSocket {
 		t.Errorf("expected %q, got %q", expectedSocket, dsnSocket)
 	}
@@ -99,7 +99,7 @@ func TestGetDSN(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	expectedIPv6 := "root:pw@tcp([::1]:3306)/"
+	expectedIPv6 := "root:pw@tcp([::1]:3306)/?readTimeout=30s&timeout=5s"
 	if dsnIPv6 != expectedIPv6 {
 		t.Errorf("expected %q, got %q", expectedIPv6, dsnIPv6)
 	}
@@ -219,6 +219,16 @@ func TestGetDSNTLSErrors(t *testing.T) {
 }
 
 func TestGetDSNTLSSuccess(t *testing.T) {
+	// Keep the process-global TLS registry clean for other tests in the package.
+	t.Cleanup(func() {
+		tlsRegisteredMu.Lock()
+		defer tlsRegisteredMu.Unlock()
+		for name := range tlsRegistered {
+			mysql.DeregisterTLSConfig(name)
+		}
+		tlsRegistered = map[string]struct{}{}
+	})
+
 	tmpDir := t.TempDir()
 	validCAFile := filepath.Join(tmpDir, "valid-ca.pem")
 	caPEM := generateTestCACertPEM(t)
@@ -239,7 +249,52 @@ func TestGetDSNTLSSuccess(t *testing.T) {
 		t.Fatalf("unexpected error with valid CA: %v", err)
 	}
 	if !strings.Contains(dsn, "tls=mbkp-tls") {
-		t.Errorf("expected DSN to contain ?tls=mbkp-tls, got %q", dsn)
+		t.Errorf("expected DSN to contain ?tls=mbkp-tls..., got %q", dsn)
+	}
+
+	// Repeated calls must reuse the single registration instead of
+	// re-registering: identical DSN, exactly one registry entry.
+	dsnRepeat, err := cfg.GetDSN()
+	if err != nil {
+		t.Fatalf("unexpected error on repeated call: %v", err)
+	}
+	if dsnRepeat != dsn {
+		t.Errorf("expected identical DSN across repeated calls, got %q and %q", dsn, dsnRepeat)
+	}
+	if got := len(tlsRegistered); got != 1 {
+		t.Errorf("expected exactly 1 registered TLS config after repeated calls, got %d", got)
+	}
+
+	// Different TLS material must register under a distinct name instead of
+	// silently reusing (or overwriting) the previous registration.
+	otherCAFile := filepath.Join(tmpDir, "other-ca.pem")
+	if err := os.WriteFile(otherCAFile, generateTestCACertPEM(t), 0600); err != nil {
+		t.Fatalf("failed to write other CA file: %v", err)
+	}
+	cfgOther := &Config{
+		User:     "root",
+		Password: "pw",
+		Host:     "127.0.0.1",
+		Port:     3306,
+		TLSCA:    otherCAFile,
+	}
+	dsnOther, err := cfgOther.GetDSN()
+	if err != nil {
+		t.Fatalf("unexpected error with other CA: %v", err)
+	}
+	parsed, err := mysql.ParseDSN(dsn)
+	if err != nil {
+		t.Fatalf("failed to parse DSN %q: %v", dsn, err)
+	}
+	parsedOther, err := mysql.ParseDSN(dsnOther)
+	if err != nil {
+		t.Fatalf("failed to parse DSN %q: %v", dsnOther, err)
+	}
+	if parsed.TLSConfig == parsedOther.TLSConfig {
+		t.Errorf("expected distinct TLS config names for distinct CA material, both are %q", parsed.TLSConfig)
+	}
+	if got := len(tlsRegistered); got != 2 {
+		t.Errorf("expected exactly 2 registered TLS configs for distinct material, got %d", got)
 	}
 }
 

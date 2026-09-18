@@ -2,9 +2,11 @@ package mbkp
 
 import (
 	"context"
+	"crypto/sha256"
 	"crypto/tls"
 	"crypto/x509"
 	"database/sql"
+	"encoding/hex"
 	"fmt"
 	"log/slog"
 	"net"
@@ -12,9 +14,30 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strconv"
+	"sync"
+	"time"
 
 	"github.com/go-sql-driver/mysql"
 	"github.com/spf13/viper"
+)
+
+// Bounds applied to every database connection so a hung network path (a server
+// that accepts the connection but never answers, a black-holed route) fails in
+// bounded time instead of stalling the caller indefinitely. All queries mbkp
+// runs over these connections (SHOW VARIABLES, FLUSH BINARY LOGS, SHOW BINARY
+// LOGS) are fast metadata operations, so the read timeout never cuts a
+// legitimately slow one short.
+const (
+	connectTimeout = 5 * time.Second
+	readTimeout    = 30 * time.Second
+)
+
+// TLS material already registered with the mysql driver's process-global
+// registry, keyed by the fingerprint-derived config name (see
+// registerMySQLTLSConfig).
+var (
+	tlsRegisteredMu sync.Mutex
+	tlsRegistered   = map[string]struct{}{}
 )
 
 type Config struct {
@@ -154,6 +177,8 @@ func (c *Config) GetDSN() (string, error) {
 	mc := mysql.NewConfig()
 	mc.User = c.User
 	mc.Passwd = c.Password
+	mc.Timeout = connectTimeout
+	mc.ReadTimeout = readTimeout
 	if c.Socket != "" {
 		mc.Net = "unix"
 		mc.Addr = c.Socket
@@ -164,23 +189,36 @@ func (c *Config) GetDSN() (string, error) {
 
 	// Setup TLS if specified
 	if c.TLSCA != "" || c.TLSCert != "" {
-		tlsConfigName := "mbkp-tls"
 		tlsConfig := &tls.Config{}
+		// The PEM bytes double as fingerprint input for the one-time
+		// registration below, so read the key pair from memory rather than
+		// through tls.LoadX509KeyPair's file paths.
+		var caPEM, certPEM, keyPEM []byte
 
 		if c.TLSCA != "" {
-			caCert, err := os.ReadFile(c.TLSCA)
+			var err error
+			caPEM, err = os.ReadFile(c.TLSCA)
 			if err != nil {
 				return "", fmt.Errorf("failed to read TLS CA: %w", err)
 			}
 			caCertPool := x509.NewCertPool()
-			if !caCertPool.AppendCertsFromPEM(caCert) {
+			if !caCertPool.AppendCertsFromPEM(caPEM) {
 				return "", fmt.Errorf("no valid certificates parsed from TLS CA file %s", c.TLSCA)
 			}
 			tlsConfig.RootCAs = caCertPool
 		}
 
 		if c.TLSCert != "" && c.TLSKey != "" {
-			cert, err := tls.LoadX509KeyPair(c.TLSCert, c.TLSKey)
+			var err error
+			certPEM, err = os.ReadFile(c.TLSCert)
+			if err != nil {
+				return "", fmt.Errorf("failed to load client TLS key pair: %w", err)
+			}
+			keyPEM, err = os.ReadFile(c.TLSKey)
+			if err != nil {
+				return "", fmt.Errorf("failed to load client TLS key pair: %w", err)
+			}
+			cert, err := tls.X509KeyPair(certPEM, keyPEM)
 			if err != nil {
 				return "", fmt.Errorf("failed to load client TLS key pair: %w", err)
 			}
@@ -189,15 +227,47 @@ func (c *Config) GetDSN() (string, error) {
 
 		tlsConfig.InsecureSkipVerify = !c.TLSVerify
 
-		err := mysql.RegisterTLSConfig(tlsConfigName, tlsConfig)
+		tlsConfigName, err := registerMySQLTLSConfig(caPEM, certPEM, keyPEM, c.TLSVerify, tlsConfig)
 		if err != nil {
-			return "", fmt.Errorf("failed to register TLS config: %w", err)
+			return "", err
 		}
 
 		mc.TLSConfig = tlsConfigName
 	}
 
 	return mc.FormatDSN(), nil
+}
+
+// registerMySQLTLSConfig registers tlsConfig with the mysql driver's
+// process-global TLS registry at most once per unique TLS material. The
+// registration name is derived from a SHA-256 fingerprint of the material, so
+// repeated calls with identical settings (e.g. the PITR readiness loop's
+// connect polls) reuse the existing registration instead of re-registering,
+// and changed settings get a fresh name instead of silently overwriting the
+// old one. Registrations are intentionally never deregistered: their lifetime
+// is the process lifetime (the driver looks names up lazily on every dial,
+// and a CLI has no point where pooled connections are guaranteed done), and
+// the per-material names keep the registry from ever going stale.
+func registerMySQLTLSConfig(caPEM, certPEM, keyPEM []byte, verify bool, tlsConfig *tls.Config) (string, error) {
+	// Length-prefix each field so different material splits cannot collide.
+	fp := sha256.New()
+	for _, b := range [][]byte{caPEM, certPEM, keyPEM} {
+		_, _ = fmt.Fprintf(fp, "%d\n", len(b))
+		_, _ = fp.Write(b)
+	}
+	_, _ = fmt.Fprintf(fp, "verify=%t", verify)
+	name := "mbkp-tls-" + hex.EncodeToString(fp.Sum(nil)[:8])
+
+	tlsRegisteredMu.Lock()
+	defer tlsRegisteredMu.Unlock()
+	if _, ok := tlsRegistered[name]; ok {
+		return name, nil
+	}
+	if err := mysql.RegisterTLSConfig(name, tlsConfig); err != nil {
+		return "", fmt.Errorf("failed to register TLS config: %w", err)
+	}
+	tlsRegistered[name] = struct{}{}
+	return name, nil
 }
 
 // ConnectDB establishes a connection to the database
