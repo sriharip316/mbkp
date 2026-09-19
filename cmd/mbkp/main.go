@@ -302,20 +302,48 @@ func init() {
 }
 
 func main() {
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer stop()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	// The first SIGINT/SIGTERM initiates graceful shutdown; the signal is
+	// recorded so the exit status can follow the 128+N convention (130 for
+	// SIGINT, 143 for SIGTERM). After it, the handler is deregistered so a
+	// second signal immediately terminates via default OS handling.
+	sigCh := make(chan os.Signal, 1)
+	signal.Notify(sigCh, os.Interrupt, syscall.SIGTERM)
+	defer signal.Stop(sigCh)
+	shutdownSignal := make(chan os.Signal, 1)
 
 	go func() {
-		<-ctx.Done()
-		// After the first signal initiates graceful shutdown, deregister the handler
-		// so a second signal immediately terminates via default OS handling.
-		stop()
+		sig, ok := <-sigCh
+		if !ok {
+			return
+		}
+		// Record the signal before canceling the context: the buffered send
+		// happens-before cancel(), so the exit-code reader can never miss it.
+		shutdownSignal <- sig
+		cancel()
+		signal.Stop(sigCh)
 	}()
 
 	if err := rootCmd.ExecuteContext(ctx); err != nil {
 		if errors.Is(err, context.Canceled) || errors.Is(ctx.Err(), context.Canceled) {
-			os.Exit(130)
+			os.Exit(shutdownExitCode(shutdownSignal))
 		}
 		os.Exit(1)
 	}
+}
+
+// shutdownExitCode maps the signal that triggered graceful shutdown to the
+// conventional 128+N exit status (130 for SIGINT, 143 for SIGTERM). It falls
+// back to the SIGINT status when no signal was recorded.
+func shutdownExitCode(received <-chan os.Signal) int {
+	select {
+	case sig := <-received:
+		if sig == syscall.SIGTERM {
+			return 143
+		}
+	default:
+	}
+	return 130
 }

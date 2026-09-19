@@ -36,13 +36,6 @@ func PrepareChain(ctx context.Context, cfg *Config, backupID string) (string, er
 		}
 	}
 
-	if backupID == "" {
-		backupID = chain[len(chain)-1].ID
-	}
-	if !isValidBackupID(backupID) {
-		return "", fmt.Errorf("invalid backup ID %q", backupID)
-	}
-
 	slog.Info("Resolved backup chain", "length", len(chain))
 	for i, b := range chain {
 		slog.Info("Backup in chain", "index", i, "type", b.Type, "id", b.ID, "path", b.Path)
@@ -341,9 +334,11 @@ func RestoreBackup(ctx context.Context, cfg *Config, backupID string, datadir st
 	// 2. Perform copy-back
 	slog.Info("Restoring prepared files to data directory", "prepare_dir", prepareDir, "datadir", datadir)
 
-	// Create target datadir if it doesn't exist
+	// Create target datadir if it doesn't exist. Database data directories are
+	// conventionally 0750: server-owned and group-traversable, not
+	// world-listable.
 	if _, err := os.Stat(datadir); os.IsNotExist(err) {
-		if err := os.MkdirAll(datadir, 0755); err != nil {
+		if err := os.MkdirAll(datadir, 0750); err != nil {
 			return fmt.Errorf("failed to create target datadir: %w", err)
 		}
 	}

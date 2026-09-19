@@ -42,10 +42,10 @@ func TestScanBinaryLogs_StandardColumns(t *testing.T) {
 	if len(logs) != 2 {
 		t.Fatalf("expected 2 binlogs, got %d", len(logs))
 	}
-	if logs[0].LogName != "mysql-bin.000001" || logs[0].Size != 512 {
+	if logs[0].LogName != "mysql-bin.000001" {
 		t.Errorf("unexpected logs[0]: %+v", logs[0])
 	}
-	if logs[1].LogName != "mysql-bin.000002" || logs[1].Size != 1024 {
+	if logs[1].LogName != "mysql-bin.000002" {
 		t.Errorf("unexpected logs[1]: %+v", logs[1])
 	}
 }
@@ -84,10 +84,10 @@ func TestScanBinaryLogs_EncryptedColumn(t *testing.T) {
 	if len(logs) != 2 {
 		t.Fatalf("expected 2 binlogs, got %d", len(logs))
 	}
-	if logs[0].LogName != "binlog.000001" || logs[0].Size != 2048 {
+	if logs[0].LogName != "binlog.000001" {
 		t.Errorf("unexpected logs[0]: %+v", logs[0])
 	}
-	if logs[1].LogName != "binlog.000002" || logs[1].Size != 4096 {
+	if logs[1].LogName != "binlog.000002" {
 		t.Errorf("unexpected logs[1]: %+v", logs[1])
 	}
 }

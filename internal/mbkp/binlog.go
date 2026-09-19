@@ -124,9 +124,11 @@ func BackupBinlogs(ctx context.Context, cfg *Config) error {
 	return nil
 }
 
+// binlogFileInfo carries the binlog name from a SHOW BINARY LOGS row. The
+// File_size column is still scanned (the row shape requires it) but its value
+// is not retained — nothing downstream consumes it.
 type binlogFileInfo struct {
 	LogName string
-	Size    int64
 }
 
 // scanBinaryLogs reads rows from SHOW BINARY LOGS, handles both 2-column
@@ -142,6 +144,8 @@ func scanBinaryLogs(rows *sql.Rows) ([]binlogFileInfo, error) {
 	var binlogs []binlogFileInfo
 	for rows.Next() {
 		var name string
+		// File_size is scanned to consume the column but discarded — see the
+		// binlogFileInfo comment.
 		var size int64
 		// In some MariaDB versions, SHOW BINARY LOGS has columns: Log_name, File_size, Encrypted
 		// We scan the first two columns which are always Log_name and File_size
@@ -154,7 +158,7 @@ func scanBinaryLogs(rows *sql.Rows) ([]binlogFileInfo, error) {
 		if err != nil {
 			return nil, fmt.Errorf("failed to scan binary log row: %w", err)
 		}
-		binlogs = append(binlogs, binlogFileInfo{LogName: name, Size: size})
+		binlogs = append(binlogs, binlogFileInfo{LogName: name})
 	}
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("error iterating binary log rows: %w", err)

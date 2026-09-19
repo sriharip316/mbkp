@@ -1,7 +1,9 @@
 package mbkp
 
 import (
+	"bytes"
 	"context"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
@@ -558,5 +560,95 @@ func TestPurgeBackupsSkipsRowsWithEscapingPath(t *testing.T) {
 	}
 	if _, err := GetBackupByID(backupDir, "full_good"); err == nil {
 		t.Error("expected metadata of the legitimate expired row to be deleted")
+	}
+}
+
+// TestPurgeBackupsDoesNotRepurgeMissingArchives pins the external-deletion
+// scan handoff: a row whose archive is missing is fully handled by that scan
+// (metadata removed, or would be under --dry-run), and the purge step that
+// follows must not emit a second "Purging backup" pass for the record that no
+// longer exists.
+func TestPurgeBackupsDoesNotRepurgeMissingArchives(t *testing.T) {
+	tmpDir := t.TempDir()
+	cfg := &Config{
+		BackupDir: tmpDir,
+	}
+
+	db, err := openDB(tmpDir)
+	if err != nil {
+		t.Fatalf("failed to open test db: %v", err)
+	}
+	_ = db.Close()
+
+	now := time.Now()
+	backups := []BackupMetadata{
+		{
+			ID:        "full_missing",
+			Type:      "full",
+			Status:    "completed",
+			StartTime: now.Add(-12 * 24 * time.Hour).Add(-1 * time.Hour),
+			EndTime:   now.Add(-12 * 24 * time.Hour),
+			Path:      "full_missing.xbstream.lz4", // no file on disk
+		},
+		{
+			ID:        "full_present",
+			Type:      "full",
+			Status:    "completed",
+			StartTime: now.Add(-12 * 24 * time.Hour).Add(-1 * time.Hour),
+			EndTime:   now.Add(-12 * 24 * time.Hour),
+			Path:      "full_present.xbstream.lz4",
+		},
+	}
+	for _, b := range backups {
+		if b.ID == "full_present" {
+			if err := os.WriteFile(filepath.Join(tmpDir, b.Path), []byte("placeholder"), 0644); err != nil {
+				t.Fatalf("failed to write archive placeholder: %v", err)
+			}
+		}
+		if err := AddBackup(tmpDir, b); err != nil {
+			t.Fatalf("failed to add backup metadata for %s: %v", b.ID, err)
+		}
+	}
+
+	// Capture the purge logs; no test in this package runs in parallel, so
+	// swapping the default logger is safe.
+	var logBuf bytes.Buffer
+	prevDefault := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logBuf, nil)))
+	t.Cleanup(func() { slog.SetDefault(prevDefault) })
+
+	// Dry run: the missing row may only be reported by the external-deletion
+	// scan; the purge step must not list it.
+	if err := PurgeBackups(context.Background(), cfg, "5d", true); err != nil {
+		t.Fatalf("dry-run purge failed: %v", err)
+	}
+	for _, line := range strings.Split(logBuf.String(), "\n") {
+		if strings.Contains(line, "full_missing") && strings.Contains(line, "Would purge backup") {
+			t.Errorf("dry-run purge step re-listed a missing-archive row: %s", line)
+		}
+	}
+	if !strings.Contains(logBuf.String(), "Would purge backup") {
+		t.Error("dry-run purge did not report the expired row whose archive exists")
+	}
+
+	logBuf.Reset()
+
+	// Real run: same expectation, plus both rows end up gone from the catalog.
+	if err := PurgeBackups(context.Background(), cfg, "5d", false); err != nil {
+		t.Fatalf("purge failed: %v", err)
+	}
+	for _, line := range strings.Split(logBuf.String(), "\n") {
+		if strings.Contains(line, "full_missing") && strings.Contains(line, "Purging backup") {
+			t.Errorf("purge step re-processed a missing-archive row: %s", line)
+		}
+	}
+	if _, err := os.Stat(filepath.Join(tmpDir, "full_present.xbstream.lz4")); !os.IsNotExist(err) {
+		t.Error("expected archive file of the expired row to be purged")
+	}
+	if _, err := GetBackupByID(tmpDir, "full_missing"); err == nil {
+		t.Error("expected metadata of the missing-archive row to be deleted by the external-deletion scan")
+	}
+	if _, err := GetBackupByID(tmpDir, "full_present"); err == nil {
+		t.Error("expected metadata of the expired row to be purged")
 	}
 }

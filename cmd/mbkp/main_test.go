@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"os"
+	"syscall"
 	"testing"
 	"time"
 
@@ -69,5 +71,26 @@ func TestBackupCmdRequiresSubcommand(t *testing.T) {
 	err := rootCmd.ExecuteContext(context.Background())
 	if err == nil {
 		t.Fatal("expected 'mbkp backup' without subcommand to return error")
+	}
+}
+
+func TestShutdownExitCode(t *testing.T) {
+	// No recorded signal (e.g. the context was canceled by another path):
+	// the SIGINT convention is the fallback.
+	empty := make(chan os.Signal, 1)
+	if got := shutdownExitCode(empty); got != 130 {
+		t.Errorf("shutdownExitCode(empty) = %d, want 130", got)
+	}
+
+	intCh := make(chan os.Signal, 1)
+	intCh <- os.Interrupt
+	if got := shutdownExitCode(intCh); got != 130 {
+		t.Errorf("shutdownExitCode(SIGINT) = %d, want 130", got)
+	}
+
+	termCh := make(chan os.Signal, 1)
+	termCh <- syscall.SIGTERM
+	if got := shutdownExitCode(termCh); got != 143 {
+		t.Errorf("shutdownExitCode(SIGTERM) = %d, want 143", got)
 	}
 }

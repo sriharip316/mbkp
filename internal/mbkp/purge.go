@@ -181,6 +181,13 @@ func PurgeBackups(ctx context.Context, cfg *Config, retentionStr string, dryRun 
 
 	// 2. External Deletion Scan: Check if backup files are deleted outside mbkp
 	var activeBackups []BackupMetadata
+	// missingHandled marks rows whose archive is gone and whose metadata this
+	// scan already removed (or would remove, under --dry-run). The purge step
+	// below iterates the same pre-loaded rows and must skip these, or it would
+	// emit a misleading second "Purging backup" pass and a no-op metadata
+	// delete for records that no longer exist. Rows whose deletion failed stay
+	// unmarked so the purge step retries them once.
+	missingHandled := make(map[string]bool)
 	for _, b := range metaData.Backups {
 		if err := ctx.Err(); err != nil {
 			return err
@@ -195,10 +202,13 @@ func PurgeBackups(ctx context.Context, cfg *Config, retentionStr string, dryRun 
 		if _, err := os.Stat(archivePath); os.IsNotExist(err) {
 			if dryRun {
 				slog.Warn("Backup archive file not found on disk; would clean up metadata", "id", b.ID, "path", archivePath, "dry_run", true)
+				missingHandled[b.ID] = true
 			} else {
 				slog.Warn("Backup archive file not found on disk; cleaning up metadata", "id", b.ID, "path", archivePath, "dry_run", false)
 				if err := DeleteBackup(cfg.BackupDir, b.ID); err != nil {
 					slog.Error("failed to delete backup metadata", "id", b.ID, "error", err)
+				} else {
+					missingHandled[b.ID] = true
 				}
 			}
 		} else {
@@ -248,6 +258,10 @@ func PurgeBackups(ctx context.Context, cfg *Config, retentionStr string, dryRun 
 		}
 
 		if keepIDs[b.ID] {
+			continue
+		}
+
+		if missingHandled[b.ID] {
 			continue
 		}
 
