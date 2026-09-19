@@ -413,6 +413,30 @@ func TestDetectCompressor(t *testing.T) {
 	}
 }
 
+func TestValidateCatalogPath(t *testing.T) {
+	backupDir := string(filepath.Separator) + "backups" // arbitrary absolute base
+	tests := []struct {
+		relPath string
+		wantErr bool
+	}{
+		{"full_x.xbstream.gz", false},
+		{"sub/dir/full_x.xbstream.gz", false},
+		{"/abs/full_x.xbstream.gz", false},  // filepath.Join neutralizes absolute paths
+		{"..foo/full_x.xbstream.gz", false}, // starts with ".." but stays inside
+		{"../evil.xbstream.gz", true},
+		{"sub/../../evil.xbstream.gz", true},
+		{"..", true},
+		{".", true},
+		{"", true},
+	}
+	for _, tt := range tests {
+		err := validateCatalogPath(backupDir, tt.relPath)
+		if (err != nil) != tt.wantErr {
+			t.Errorf("validateCatalogPath(%q) error = %v, wantErr %v", tt.relPath, err, tt.wantErr)
+		}
+	}
+}
+
 func TestNewBackupID(t *testing.T) {
 	idRe := regexp.MustCompile(`^(full|inc)_\d{8}_\d{6}_\d{3}$`)
 

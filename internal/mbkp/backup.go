@@ -354,6 +354,12 @@ func newBackupID(prefix string) string {
 // uses newBackupID.
 var backupIDGenerator = newBackupID
 
+// compressorDetector selects the compression tool used by the backup and
+// binlog-archiving entry points. It is a variable only so tests can inject a
+// compressor whose process fails to start; production always uses
+// detectCompressor.
+var compressorDetector = detectCompressor
+
 // backupIDRe matches safe backup IDs consisting only of alphanumeric characters,
 // dashes, and underscores. This protects against directory traversal and path
 // injection when backup IDs are used in filesystem operations.
@@ -366,16 +372,22 @@ func isValidBackupID(id string) bool {
 
 // streamBackup runs: <backupBin> <mariabackupArgs> | <comp> <compressArgs> > <archive>
 func streamBackup(ctx context.Context, cfg *Config, archive string, comp Compressor, mariabackupArgs []string) error {
-	outFile, err := os.OpenFile(archive, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0600)
-	if err != nil {
-		return fmt.Errorf("failed to create archive file %s: %w", archive, err)
-	}
-
+	// mariabackup and mariadb-backup take the password from the MYSQL_PWD
+	// environment variable set below. xtrabackup ignores MYSQL_PWD, so its
+	// password must reach it through a [client] option file instead — which
+	// cannot represent every password safely: '"' breaks out of the quoting
+	// (allowing arbitrary [client] directives to be injected), '\' manipulates
+	// the parser's escape sequences, and line breaks let the value spill into
+	// new directives. Fail fast on those before any file is created; '#' is
+	// safe inside a quoted value (option-file comments only start at the
+	// beginning of a line).
 	var tempCnfFile string
 	if cfg.Password != "" && cfg.BackupBin == "xtrabackup" {
+		if strings.ContainsAny(cfg.Password, "\"\\\n\r") {
+			return fmt.Errorf("the database password contains a quote, backslash, or line break, which cannot be stored safely in the xtrabackup option file; use a password without those characters for xtrabackup-based servers")
+		}
 		tmpFile, err := os.CreateTemp("", "mbkp-xtrabackup-*.cnf")
 		if err != nil {
-			_ = outFile.Close()
 			return fmt.Errorf("failed to create temporary config file: %w", err)
 		}
 		tempCnfFile = tmpFile.Name()
@@ -386,12 +398,16 @@ func streamBackup(ctx context.Context, cfg *Config, archive string, comp Compres
 		content := fmt.Sprintf("[client]\npassword=\"%s\"\n", cfg.Password)
 		if _, err := tmpFile.WriteString(content); err != nil {
 			_ = tmpFile.Close()
-			_ = outFile.Close()
 			return fmt.Errorf("failed to write temporary config file: %w", err)
 		}
 		_ = tmpFile.Close()
 
 		mariabackupArgs = append([]string{"--defaults-extra-file=" + tempCnfFile}, mariabackupArgs...)
+	}
+
+	outFile, err := os.OpenFile(archive, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0600)
+	if err != nil {
+		return fmt.Errorf("failed to create archive file %s: %w", archive, err)
 	}
 
 	cmdMariabackup := exec.CommandContext(ctx, cfg.BackupBin, mariabackupArgs...)
@@ -421,6 +437,7 @@ func streamBackup(ctx context.Context, cfg *Config, archive string, comp Compres
 		_ = cmdMariabackup.Process.Kill()
 		_ = cmdMariabackup.Wait()
 		_ = outFile.Close()
+		_ = os.Remove(archive)
 		return fmt.Errorf("failed to start %s: %w", comp.Name, err)
 	}
 
@@ -449,7 +466,7 @@ func RunFullBackup(ctx context.Context, cfg *Config) (err error) {
 		return err
 	}
 
-	comp := detectCompressor()
+	comp := compressorDetector()
 
 	backupID := backupIDGenerator("full_")
 	archive := archivePath(cfg.BackupDir, backupID, comp)
@@ -565,7 +582,7 @@ func RunIncrementalBackup(ctx context.Context, cfg *Config, parentID string) (er
 			parentBackup.ID)
 	}
 
-	comp := detectCompressor()
+	comp := compressorDetector()
 
 	backupID := backupIDGenerator("inc_")
 	archive := archivePath(cfg.BackupDir, backupID, comp)

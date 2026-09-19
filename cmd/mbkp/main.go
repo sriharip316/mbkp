@@ -207,7 +207,7 @@ var pitrCmd = &cobra.Command{
 		}
 		parsedTime, err := parseTargetTime(targetTime)
 		if err != nil {
-			slog.Error("Error parsing target-time, must be in RFC3339 format (e.g. 2006-01-02T15:04:05Z or '2006-01-02T15:04:05+05:30') or 'YYYY-MM-DD HH:MM:SS' (interpreted in the local timezone)", "target_time", targetTime)
+			slog.Error("Error parsing target-time, must be in RFC3339 format (e.g. 2006-01-02T15:04:05Z or '2006-01-02T15:04:05+05:30') or 'YYYY-MM-DD HH:MM:SS' (interpreted in the local timezone)", "target_time", targetTime, "error", err)
 			return err
 		}
 		release, err := mbkp.AcquireLock(cfg.BackupDir)

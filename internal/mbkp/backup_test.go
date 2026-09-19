@@ -183,3 +183,88 @@ func TestRunIncrementalBackupMarksFailedWhenTargetDirCreationFails(t *testing.T)
 		t.Error("expected end_time to be recorded on the failed row")
 	}
 }
+
+// TestRunFullBackupRemovesArchiveWhenCompressorStartFails forces the one
+// streamBackup failure path whose cleanup used to be inconsistent: when the
+// compressor process cannot even start, the (zero-byte) archive file already
+// exists and must be removed, like every other failure path does.
+func TestRunFullBackupRemovesArchiveWhenCompressorStartFails(t *testing.T) {
+	tmpDir := t.TempDir()
+	// "true" starts fine and exits 0 immediately, so the pipeline reaches the
+	// compressor start, which fails on the injected missing binary.
+	cfg := &Config{BackupDir: tmpDir, BackupBin: "true"}
+
+	origID := backupIDGenerator
+	backupIDGenerator = func(prefix string) string { return prefix + "seamtest" }
+	defer func() { backupIDGenerator = origID }()
+
+	origComp := compressorDetector
+	compressorDetector = func() Compressor {
+		return Compressor{
+			Name:           "mbkp-missing-compressor",
+			Ext:            ".xbstream.gz",
+			CompressArgs:   []string{"-c"},
+			DecompressArgs: []string{"-dc"},
+		}
+	}
+	defer func() { compressorDetector = origComp }()
+
+	err := RunFullBackup(context.Background(), cfg)
+	if err == nil {
+		t.Fatal("expected RunFullBackup to fail when the compressor cannot start")
+	}
+	if !strings.Contains(err.Error(), "mbkp-missing-compressor") {
+		t.Errorf("expected the error to name the compressor, got: %v", err)
+	}
+
+	if _, statErr := os.Stat(filepath.Join(tmpDir, "full_seamtest.xbstream.gz")); !os.IsNotExist(statErr) {
+		t.Error("expected the archive file to be removed when the compressor fails to start")
+	}
+
+	meta, err := LoadMetadata(tmpDir)
+	if err != nil {
+		t.Fatalf("failed to load metadata: %v", err)
+	}
+	if len(meta.Backups) != 1 || meta.Backups[0].Status != "failed" {
+		t.Errorf("expected a single 'failed' catalog row, got %+v", meta.Backups)
+	}
+}
+
+// TestRunFullBackupFailsFastOnUnsafeXtrabackupPassword pins the option-file
+// guard: xtrabackup ignores MYSQL_PWD, so its password goes through a
+// [client] option file — and a password that cannot be represented safely
+// there must fail fast before any file is created, never silently produce a
+// corrupt or injectable option file.
+func TestRunFullBackupFailsFastOnUnsafeXtrabackupPassword(t *testing.T) {
+	tmpDir := t.TempDir()
+	cfg := &Config{BackupDir: tmpDir, BackupBin: "xtrabackup", Password: `pa"ss`}
+
+	origID := backupIDGenerator
+	backupIDGenerator = func(prefix string) string { return prefix + "seamtest" }
+	defer func() { backupIDGenerator = origID }()
+
+	err := RunFullBackup(context.Background(), cfg)
+	if err == nil {
+		t.Fatal("expected RunFullBackup to fail on a password that cannot be stored in the option file")
+	}
+	if !strings.Contains(err.Error(), "option file") {
+		t.Errorf("expected the error to mention the option file, got: %v", err)
+	}
+
+	// The rejection happens before the archive is even opened.
+	matches, err := filepath.Glob(filepath.Join(tmpDir, "full_seamtest*"))
+	if err != nil {
+		t.Fatalf("failed to scan backup dir: %v", err)
+	}
+	if len(matches) != 0 {
+		t.Errorf("expected no archive artifact for the rejected run, got %v", matches)
+	}
+
+	meta, err := LoadMetadata(tmpDir)
+	if err != nil {
+		t.Fatalf("failed to load metadata: %v", err)
+	}
+	if len(meta.Backups) != 1 || meta.Backups[0].Status != "failed" {
+		t.Errorf("expected a single 'failed' catalog row, got %+v", meta.Backups)
+	}
+}

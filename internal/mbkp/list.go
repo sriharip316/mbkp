@@ -92,9 +92,13 @@ func listTable(backupDir string, meta *Metadata) error {
 }
 
 // archiveSize returns a human-readable size string for the archive file stored in path.
-// Returns "-" if the file cannot be stat'd (e.g. in_progress or failed backups).
+// Returns "-" if the file cannot be stat'd (e.g. in_progress or failed backups)
+// or if the catalog path is invalid (validateCatalogPath).
 func archiveSize(backupDir, relPath string) string {
 	if relPath == "" {
+		return "-"
+	}
+	if err := validateCatalogPath(backupDir, relPath); err != nil {
 		return "-"
 	}
 	info, err := os.Stat(filepath.Join(backupDir, relPath))

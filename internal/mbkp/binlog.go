@@ -70,7 +70,7 @@ func BackupBinlogs(ctx context.Context, cfg *Config) error {
 		return fmt.Errorf("failed to create binlogs backup directory: %w", err)
 	}
 
-	comp := detectCompressor()
+	comp := compressorDetector()
 	var ext string
 	if comp.Name == "lz4" {
 		ext = ".lz4"
@@ -88,8 +88,19 @@ func BackupBinlogs(ctx context.Context, cfg *Config) error {
 		srcPath := filepath.Join(sourceDir, binlog.LogName)
 		dstPath := filepath.Join(binlogsBackupDir, binlog.LogName+ext)
 
-		// Check if it already exists
-		if _, err := os.Stat(dstPath); err == nil {
+		// Skip if the log is already archived under any compression variant:
+		// earlier runs may have used a different compressor (e.g. gzip before
+		// lz4 was installed). Archiving a second variant would leave two
+		// archives of the same binlog, which PITR would decompress into the
+		// same output path and hand to the binlog tool twice.
+		alreadyArchived := false
+		for _, variant := range []string{binlog.LogName + ".lz4", binlog.LogName + ".gz"} {
+			if _, err := os.Stat(filepath.Join(binlogsBackupDir, variant)); err == nil {
+				alreadyArchived = true
+				break
+			}
+		}
+		if alreadyArchived {
 			slog.Info("Binlog already archived, skipping", "binlog", binlog.LogName)
 			continue
 		}

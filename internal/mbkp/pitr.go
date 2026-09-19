@@ -59,8 +59,20 @@ func getBinlogFilesToApply(binlogsDir string, startFile string) ([]string, error
 	sort.Strings(filenames)
 
 	var filtered []string
+	seenBase := make(map[string]bool)
 	for _, name := range filenames {
-		if binlogBaseName(name) >= startFile {
+		base := binlogBaseName(name)
+		if seenBase[base] {
+			// A second compression variant of a binlog already selected (e.g.
+			// a .gz from an earlier run alongside a .lz4). Applying both would
+			// decompress into the same output file and replay the events
+			// twice; the first variant in sorted order wins.
+			slog.Warn("duplicate archived variant of the same binlog; applying it once",
+				"skipped", name, "binlog", base)
+			continue
+		}
+		seenBase[base] = true
+		if base >= startFile {
 			filtered = append(filtered, filepath.Join(binlogsDir, name))
 		}
 	}

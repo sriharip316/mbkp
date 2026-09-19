@@ -491,3 +491,72 @@ func TestPurgeBackupsSweepsStaleTempArtifacts(t *testing.T) {
 		}
 	}
 }
+
+// TestPurgeBackupsSkipsRowsWithEscapingPath plants a catalog row whose Path
+// resolves outside the backup directory: purge must refuse to touch both the
+// file and the metadata of that row, while legitimate expired rows around it
+// purge normally (the corrupt row must not abort the whole purge).
+func TestPurgeBackupsSkipsRowsWithEscapingPath(t *testing.T) {
+	tmpDir := t.TempDir()
+	// The backup dir is a subdirectory so the "escaping" archive can live as a
+	// sibling that is still inside tmpDir and cleaned up by t.TempDir.
+	backupDir := filepath.Join(tmpDir, "backups")
+	cfg := &Config{BackupDir: backupDir}
+	if err := os.MkdirAll(backupDir, 0755); err != nil {
+		t.Fatalf("failed to create backup dir: %v", err)
+	}
+
+	expired := time.Now().Add(-30 * 24 * time.Hour) // far outside the 7d window
+	rows := []BackupMetadata{
+		{
+			ID:        "full_evil",
+			Type:      "full",
+			Status:    "completed",
+			StartTime: expired,
+			EndTime:   expired,
+			Path:      "../evil.xbstream.gz", // resolves outside the backup dir
+		},
+		{
+			ID:        "full_good",
+			Type:      "full",
+			Status:    "completed",
+			StartTime: expired,
+			EndTime:   expired,
+			Path:      "full_good.xbstream.gz",
+		},
+	}
+	for _, b := range rows {
+		if err := AddBackup(backupDir, b); err != nil {
+			t.Fatalf("failed to seed catalog: %v", err)
+		}
+	}
+
+	escapeFile := filepath.Join(tmpDir, "evil.xbstream.gz")
+	if err := os.WriteFile(escapeFile, []byte("x"), 0644); err != nil {
+		t.Fatalf("failed to create escape file: %v", err)
+	}
+	goodFile := filepath.Join(backupDir, "full_good.xbstream.gz")
+	if err := os.WriteFile(goodFile, []byte("x"), 0644); err != nil {
+		t.Fatalf("failed to create good archive: %v", err)
+	}
+
+	if err := PurgeBackups(context.Background(), cfg, "7d", false); err != nil {
+		t.Fatalf("PurgeBackups failed: %v", err)
+	}
+
+	// The escaping row: neither its file nor its metadata may be touched.
+	if _, err := os.Stat(escapeFile); err != nil {
+		t.Errorf("file outside the backup directory must not be deleted (stat error: %v)", err)
+	}
+	if _, err := GetBackupByID(backupDir, "full_evil"); err != nil {
+		t.Errorf("metadata of the escaping row must be retained: %v", err)
+	}
+
+	// The legitimate expired row purges normally.
+	if _, err := os.Stat(goodFile); !os.IsNotExist(err) {
+		t.Error("expected the legitimate expired archive to be deleted")
+	}
+	if _, err := GetBackupByID(backupDir, "full_good"); err == nil {
+		t.Error("expected metadata of the legitimate expired row to be deleted")
+	}
+}

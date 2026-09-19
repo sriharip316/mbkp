@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	_ "modernc.org/sqlite"
@@ -238,6 +239,27 @@ func LoadMetadata(backupDir string) (*Metadata, error) {
 	return &Metadata{Backups: backups}, nil
 }
 
+// validateCatalogPath guards against a corrupted (or hand-edited) catalog row
+// whose Path would resolve outside the backup directory. Backup IDs are
+// regex-validated at every boundary, but Path is read back from SQLite, so
+// every consumer must reject paths that escape the backup directory before
+// using them in filesystem operations. filepath.Join neutralizes absolute
+// paths, so only ".." segments can smuggle a path out; such rows are rejected
+// here rather than followed.
+func validateCatalogPath(backupDir, relPath string) error {
+	if relPath == "" {
+		return fmt.Errorf("catalog row has an empty archive path")
+	}
+	rel, err := filepath.Rel(backupDir, filepath.Join(backupDir, relPath))
+	if err != nil {
+		return fmt.Errorf("cannot resolve archive path %q within %q: %w", relPath, backupDir, err)
+	}
+	if rel == "." || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return fmt.Errorf("archive path %q escapes the backup directory", relPath)
+	}
+	return nil
+}
+
 // GetLatestBackup returns the most recently completed backup, or nil if none exist.
 func GetLatestBackup(backupDir string) (*BackupMetadata, error) {
 	db, err := openDB(backupDir)
@@ -260,6 +282,12 @@ func GetLatestBackup(backupDir string) (*BackupMetadata, error) {
 			return nil, err
 		}
 		return &b, nil
+	}
+	// A false Next() can mean "no rows" or "the query failed mid-flight";
+	// distinguishing them keeps an I/O error from masquerading as
+	// "no completed backups found".
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("error iterating backup rows: %w", err)
 	}
 	return nil, nil
 }
@@ -284,6 +312,9 @@ func GetBackupByID(backupDir string, id string) (*BackupMetadata, error) {
 			return nil, err
 		}
 		return &b, nil
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("error iterating backup rows: %w", err)
 	}
 	return nil, fmt.Errorf("backup with ID %q not found", id)
 }
@@ -320,7 +351,13 @@ func ResolveChain(backupDir string, targetID string) ([]BackupMetadata, error) {
 		}
 
 		if !rows.Next() {
+			// Check for an iteration failure before concluding not-found, so
+			// a mid-query I/O error is not misreported as a broken lineage.
+			iterErr := rows.Err()
 			_ = rows.Close()
+			if iterErr != nil {
+				return nil, fmt.Errorf("error iterating backup rows: %w", iterErr)
+			}
 			return nil, fmt.Errorf("backup ID %q in lineage chain not found or not completed", currID)
 		}
 		b, err := scanBackup(rows)

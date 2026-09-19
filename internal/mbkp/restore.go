@@ -27,6 +27,15 @@ func PrepareChain(ctx context.Context, cfg *Config, backupID string) (string, er
 		return "", fmt.Errorf("failed to resolve backup chain for ID %q: %w", backupID, targetIDError(backupID, err))
 	}
 
+	// A corrupted catalog row whose Path escapes the backup directory must
+	// never reach a filesystem operation (extraction below), so fail loudly
+	// before touching disk.
+	for _, b := range chain {
+		if err := validateCatalogPath(cfg.BackupDir, b.Path); err != nil {
+			return "", fmt.Errorf("corrupted catalog entry for backup %q: %w", b.ID, err)
+		}
+	}
+
 	if backupID == "" {
 		backupID = chain[len(chain)-1].ID
 	}

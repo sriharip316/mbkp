@@ -186,6 +186,11 @@ func PurgeBackups(ctx context.Context, cfg *Config, retentionStr string, dryRun 
 			return err
 		}
 
+		if err := validateCatalogPath(cfg.BackupDir, b.Path); err != nil {
+			slog.Error("catalog row has an invalid archive path; skipping it (metadata retained)", "id", b.ID, "path", b.Path, "error", err)
+			continue
+		}
+
 		archivePath := filepath.Join(cfg.BackupDir, b.Path)
 		if _, err := os.Stat(archivePath); os.IsNotExist(err) {
 			if dryRun {
@@ -243,6 +248,14 @@ func PurgeBackups(ctx context.Context, cfg *Config, retentionStr string, dryRun 
 		}
 
 		if keepIDs[b.ID] {
+			continue
+		}
+
+		// This loop walks every catalog row (not just the active ones), so it
+		// is the last line of defense: a row with an escaping Path is refused
+		// entirely — neither its file nor its metadata is touched.
+		if err := validateCatalogPath(cfg.BackupDir, b.Path); err != nil {
+			slog.Error("catalog row has an invalid archive path; skipping it (metadata retained)", "id", b.ID, "path", b.Path, "error", err)
 			continue
 		}
 

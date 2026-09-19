@@ -77,3 +77,39 @@ func TestGetBinlogFilesToApplyGapBeforeStartFile(t *testing.T) {
 		t.Errorf("got %v, want %v", got, want)
 	}
 }
+
+// TestGetBinlogFilesToApplyDeduplicatesVariants guards against replaying a
+// binlog twice when the archive holds two compression variants of the same
+// file (e.g. a gzip run followed by an lz4 run): the second variant would
+// decompress into the same output path and be handed to the binlog tool twice.
+func TestGetBinlogFilesToApplyDeduplicatesVariants(t *testing.T) {
+	dir := t.TempDir()
+	files := []string{
+		"binlog.000001.lz4",
+		"binlog.000001.gz", // duplicate variant of the same binlog
+		"binlog.000002.lz4",
+	}
+	for _, f := range files {
+		if err := os.WriteFile(filepath.Join(dir, f), []byte("x"), 0644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	got, err := getBinlogFilesToApply(dir, "binlog.000001")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if len(got) != 2 {
+		t.Fatalf("expected one entry per binlog, got %d: %v", len(got), got)
+	}
+	bases := make(map[string]int)
+	for _, p := range got {
+		bases[binlogBaseName(filepath.Base(p))]++
+	}
+	for base, n := range bases {
+		if n != 1 {
+			t.Errorf("binlog %s appears %d times, want 1", base, n)
+		}
+	}
+}
