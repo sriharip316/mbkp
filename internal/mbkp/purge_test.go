@@ -405,3 +405,89 @@ func TestResolveChainInMemory_CycleDetection(t *testing.T) {
 		t.Errorf("unexpected error message: %v", err)
 	}
 }
+
+// TestPurgeBackupsSweepsStaleTempArtifacts verifies the purge's sweep of
+// temporary artifacts left behind by crashed or killed runs (SIGKILL skips
+// the in-process defers that normally remove them).
+func TestPurgeBackupsSweepsStaleTempArtifacts(t *testing.T) {
+	tmpDir := t.TempDir()
+	cfg := &Config{BackupDir: tmpDir}
+
+	now := time.Now()
+	stale := now.Add(-2 * 24 * time.Hour) // older than staleTempMaxAge
+
+	binlogsDir := filepath.Join(tmpDir, "binlogs")
+	if err := os.MkdirAll(binlogsDir, 0755); err != nil {
+		t.Fatalf("failed to create binlogs dir: %v", err)
+	}
+
+	mkdir := func(path string, modTime time.Time) {
+		t.Helper()
+		if err := os.MkdirAll(path, 0755); err != nil {
+			t.Fatalf("failed to create %s: %v", path, err)
+		}
+		if err := os.Chtimes(path, modTime, modTime); err != nil {
+			t.Fatalf("failed to set mod time on %s: %v", path, err)
+		}
+	}
+	writeFile := func(path string, modTime time.Time) {
+		t.Helper()
+		if err := os.WriteFile(path, []byte("x"), 0644); err != nil {
+			t.Fatalf("failed to create %s: %v", path, err)
+		}
+		if err := os.Chtimes(path, modTime, modTime); err != nil {
+			t.Fatalf("failed to set mod time on %s: %v", path, err)
+		}
+	}
+
+	// Stale leftovers from crashed runs — all must be swept.
+	stalePaths := []string{
+		filepath.Join(tmpDir, "lsn_tmp_full_crashed"),
+		filepath.Join(tmpDir, "target_tmp_inc_crashed"),
+		filepath.Join(tmpDir, "prepare_full_crashed"),
+		filepath.Join(tmpDir, "pitr_binlogs_tmp"),
+		filepath.Join(binlogsDir, "mysql-bin.000001.lz4.part"),
+	}
+	// Fresh artifacts (within staleTempMaxAge) and unrelated files — must
+	// survive every purge.
+	keptPaths := []string{
+		filepath.Join(tmpDir, "prepare_recent"), // e.g. restore --prepare-only output
+		filepath.Join(tmpDir, "full_recent.xbstream.gz"),
+		filepath.Join(binlogsDir, "mysql-bin.000002.lz4"),
+	}
+
+	mkdir(stalePaths[0], stale)
+	mkdir(stalePaths[1], stale)
+	mkdir(stalePaths[2], stale)
+	mkdir(stalePaths[3], stale)
+	writeFile(stalePaths[4], stale)
+	mkdir(keptPaths[0], now)
+	writeFile(keptPaths[1], now)
+	writeFile(keptPaths[2], now)
+
+	// Dry run: nothing may be removed.
+	if err := PurgeBackups(context.Background(), cfg, "7d", true); err != nil {
+		t.Fatalf("dry-run purge failed: %v", err)
+	}
+	for _, p := range append(append([]string{}, stalePaths...), keptPaths...) {
+		if _, err := os.Stat(p); err != nil {
+			t.Errorf("%s was removed during dry-run purge", p)
+		}
+	}
+
+	// Real purge: stale leftovers swept, fresh artifacts and unrelated
+	// files intact.
+	if err := PurgeBackups(context.Background(), cfg, "7d", false); err != nil {
+		t.Fatalf("purge failed: %v", err)
+	}
+	for _, p := range stalePaths {
+		if _, err := os.Stat(p); !os.IsNotExist(err) {
+			t.Errorf("expected stale leftover %s to be swept, but it still exists", p)
+		}
+	}
+	for _, p := range keptPaths {
+		if _, err := os.Stat(p); err != nil {
+			t.Errorf("expected %s to survive the purge, but it was removed", p)
+		}
+	}
+}

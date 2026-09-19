@@ -348,6 +348,12 @@ func newBackupID(prefix string) string {
 	return fmt.Sprintf("%s%s_%03d", prefix, t.Format("20060102_150405"), ms%1000)
 }
 
+// backupIDGenerator produces the IDs used by the backup entry points. It is a
+// variable only so tests can pin a deterministic ID and thereby force the
+// failure paths that hinge on per-run directory names; production always
+// uses newBackupID.
+var backupIDGenerator = newBackupID
+
 // backupIDRe matches safe backup IDs consisting only of alphanumeric characters,
 // dashes, and underscores. This protects against directory traversal and path
 // injection when backup IDs are used in filesystem operations.
@@ -438,14 +444,14 @@ func streamBackup(ctx context.Context, cfg *Config, archive string, comp Compres
 	return nil
 }
 
-func RunFullBackup(ctx context.Context, cfg *Config) error {
+func RunFullBackup(ctx context.Context, cfg *Config) (err error) {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
 
 	comp := detectCompressor()
 
-	backupID := newBackupID("full_")
+	backupID := backupIDGenerator("full_")
 	archive := archivePath(cfg.BackupDir, backupID, comp)
 	// Per-run temp dir receiving the --extra-lsndir output (checkpoints and
 	// binlog info); its content is persisted in the catalog before cleanup.
@@ -470,6 +476,19 @@ func RunFullBackup(ctx context.Context, cfg *Config) error {
 	if err := AddBackup(cfg.BackupDir, meta); err != nil {
 		return fmt.Errorf("failed to record in_progress metadata: %w", err)
 	}
+	// The row now exists in the catalog: every failure from here on —
+	// including cancellation — must move it out of in_progress, or purge
+	// would retain the orphaned row for the whole retention window.
+	defer func() {
+		if err == nil {
+			return
+		}
+		meta.Status = "failed"
+		meta.EndTime = time.Now()
+		if uerr := UpdateBackup(cfg.BackupDir, meta); uerr != nil {
+			slog.Error("failed to record backup failure in catalog", "id", meta.ID, "error", uerr)
+		}
+	}()
 
 	targetDir := filepath.Join(cfg.BackupDir, "target_tmp_"+backupID)
 	if err := os.MkdirAll(targetDir, 0755); err != nil {
@@ -488,9 +507,6 @@ func RunFullBackup(ctx context.Context, cfg *Config) error {
 	args = append(args, cfg.GetCommonArgs()...)
 
 	if err := streamBackup(ctx, cfg, archive, comp, args); err != nil {
-		meta.Status = "failed"
-		meta.EndTime = time.Now()
-		_ = UpdateBackup(cfg.BackupDir, meta)
 		return err
 	}
 
@@ -511,34 +527,35 @@ func RunFullBackup(ctx context.Context, cfg *Config) error {
 	return nil
 }
 
-func RunIncrementalBackup(ctx context.Context, cfg *Config, parentID string) error {
+func RunIncrementalBackup(ctx context.Context, cfg *Config, parentID string) (err error) {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
 
 	var parentBackup *BackupMetadata
-	var err error
 
 	if parentID != "" {
 		if !isValidBackupID(parentID) {
 			return fmt.Errorf("invalid parent backup ID %q", parentID)
 		}
-		parentBackup, err = GetBackupByID(cfg.BackupDir, parentID)
+		pb, err := GetBackupByID(cfg.BackupDir, parentID)
 		if err != nil {
 			return fmt.Errorf("specified parent backup not found: %w", err)
 		}
+		parentBackup = pb
 		if parentBackup.Status != "completed" {
 			return fmt.Errorf("specified parent backup %s is not completed (status: %s)",
 				parentBackup.ID, parentBackup.Status)
 		}
 	} else {
-		parentBackup, err = GetLatestBackup(cfg.BackupDir)
+		pb, err := GetLatestBackup(cfg.BackupDir)
 		if err != nil {
 			return fmt.Errorf("failed to find latest backup to use as base: %w", err)
 		}
-		if parentBackup == nil {
+		if pb == nil {
 			return fmt.Errorf("no existing completed backup found to use as base. Please run a full backup first")
 		}
+		parentBackup = pb
 	}
 
 	// The incremental delta must be taken against the backup that parent_id
@@ -550,7 +567,7 @@ func RunIncrementalBackup(ctx context.Context, cfg *Config, parentID string) err
 
 	comp := detectCompressor()
 
-	backupID := newBackupID("inc_")
+	backupID := backupIDGenerator("inc_")
 	archive := archivePath(cfg.BackupDir, backupID, comp)
 	// Per-run temp dir receiving the --extra-lsndir output (checkpoints and
 	// binlog info); its content is persisted in the catalog before cleanup.
@@ -577,6 +594,19 @@ func RunIncrementalBackup(ctx context.Context, cfg *Config, parentID string) err
 	if err := AddBackup(cfg.BackupDir, meta); err != nil {
 		return fmt.Errorf("failed to record in_progress metadata: %w", err)
 	}
+	// The row now exists in the catalog: every failure from here on —
+	// including cancellation — must move it out of in_progress, or purge
+	// would retain the orphaned row for the whole retention window.
+	defer func() {
+		if err == nil {
+			return
+		}
+		meta.Status = "failed"
+		meta.EndTime = time.Now()
+		if uerr := UpdateBackup(cfg.BackupDir, meta); uerr != nil {
+			slog.Error("failed to record backup failure in catalog", "id", meta.ID, "error", uerr)
+		}
+	}()
 
 	targetDir := filepath.Join(cfg.BackupDir, "target_tmp_"+backupID)
 	if err := os.MkdirAll(targetDir, 0755); err != nil {
@@ -612,9 +642,6 @@ func RunIncrementalBackup(ctx context.Context, cfg *Config, parentID string) err
 	args = append(args, cfg.GetCommonArgs()...)
 
 	if err := streamBackup(ctx, cfg, archive, comp, args); err != nil {
-		meta.Status = "failed"
-		meta.EndTime = time.Now()
-		_ = UpdateBackup(cfg.BackupDir, meta)
 		return err
 	}
 

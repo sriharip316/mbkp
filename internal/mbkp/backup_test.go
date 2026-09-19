@@ -98,3 +98,88 @@ func TestRunFullBackupCancelDuringStreaming(t *testing.T) {
 		}
 	}
 }
+
+// TestRunFullBackupMarksFailedWhenTargetDirCreationFails pins a backup ID so
+// the per-run target directory collides with a regular file: os.MkdirAll then
+// fails after the in_progress row has been inserted — one of the failure
+// paths that used to orphan the row in in_progress (which purge would retain
+// for the whole retention window).
+func TestRunFullBackupMarksFailedWhenTargetDirCreationFails(t *testing.T) {
+	tmpDir := t.TempDir()
+	cfg := &Config{BackupDir: tmpDir}
+
+	orig := backupIDGenerator
+	backupIDGenerator = func(prefix string) string { return prefix + "seamtest" }
+	defer func() { backupIDGenerator = orig }()
+
+	// Block target_tmp_full_seamtest so os.MkdirAll fails after AddBackup.
+	if err := os.WriteFile(filepath.Join(tmpDir, "target_tmp_full_seamtest"), []byte("x"), 0644); err != nil {
+		t.Fatalf("failed to create blocking file: %v", err)
+	}
+
+	if err := RunFullBackup(context.Background(), cfg); err == nil {
+		t.Fatal("expected RunFullBackup to fail when the target directory cannot be created")
+	}
+
+	meta, err := LoadMetadata(tmpDir)
+	if err != nil {
+		t.Fatalf("failed to load metadata: %v", err)
+	}
+	if len(meta.Backups) != 1 {
+		t.Fatalf("expected exactly one catalog row, got %d", len(meta.Backups))
+	}
+	b := meta.Backups[0]
+	if b.Status != "failed" {
+		t.Errorf("expected status 'failed' after the failure, got %q", b.Status)
+	}
+	if b.EndTime.IsZero() {
+		t.Error("expected end_time to be recorded on the failed row")
+	}
+}
+
+// TestRunIncrementalBackupMarksFailedWhenTargetDirCreationFails covers the
+// same post-insert failure transition for incremental backups.
+func TestRunIncrementalBackupMarksFailedWhenTargetDirCreationFails(t *testing.T) {
+	tmpDir := t.TempDir()
+	cfg := &Config{BackupDir: tmpDir}
+
+	orig := backupIDGenerator
+	backupIDGenerator = func(prefix string) string { return prefix + "seamtest" }
+	defer func() { backupIDGenerator = orig }()
+
+	// A completed parent with stored checkpoints so the incremental gets past
+	// parent selection and inserts its own in_progress row.
+	now := time.Now()
+	parent := BackupMetadata{
+		ID:          "full_parent",
+		Type:        "full",
+		Status:      "completed",
+		StartTime:   now.Add(-time.Hour),
+		EndTime:     now,
+		Path:        "full_parent.xbstream.lz4",
+		Checkpoints: "backup_type = full-backuped\nfrom_lsn = 0\nto_lsn = 100\n",
+	}
+	if err := AddBackup(tmpDir, parent); err != nil {
+		t.Fatalf("failed to add parent backup: %v", err)
+	}
+
+	// Block target_tmp_inc_seamtest so os.MkdirAll fails after AddBackup.
+	if err := os.WriteFile(filepath.Join(tmpDir, "target_tmp_inc_seamtest"), []byte("x"), 0644); err != nil {
+		t.Fatalf("failed to create blocking file: %v", err)
+	}
+
+	if err := RunIncrementalBackup(context.Background(), cfg, ""); err == nil {
+		t.Fatal("expected RunIncrementalBackup to fail when the target directory cannot be created")
+	}
+
+	inc, err := GetBackupByID(tmpDir, "inc_seamtest")
+	if err != nil {
+		t.Fatalf("incremental row missing from catalog: %v", err)
+	}
+	if inc.Status != "failed" {
+		t.Errorf("expected status 'failed' after the failure, got %q", inc.Status)
+	}
+	if inc.EndTime.IsZero() {
+		t.Error("expected end_time to be recorded on the failed row")
+	}
+}

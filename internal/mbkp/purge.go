@@ -83,7 +83,79 @@ func resolveChainInMemory(backupMap map[string]BackupMetadata, targetID string) 
 	return chain, nil
 }
 
-// PurgeBackups scans backups, cleans up missing ones, applies the retention policy, and deletes expired files/metadata.
+// staleTempMaxAge bounds how old a temporary artifact must be before the
+// purge sweep removes it. Purge holds the exclusive directory lock, so no
+// other mbkp run can be active and every match is a leftover from a crashed
+// or killed run; the age threshold is conservative extra safety for fresh
+// artifacts an operator may still be using (e.g. a prepare-only directory
+// just handed over by `restore --prepare-only`).
+const staleTempMaxAge = 24 * time.Hour
+
+// staleTempPatterns matches the temporary artifacts mbkp creates inside the
+// backup directory while a run is in flight. In-process defers clean them up
+// on ordinary failures, but a SIGKILL/OOM skips those defers — without a
+// sweep the leftovers would grow without bound.
+var staleTempPatterns = []string{
+	"lsn_tmp_*",                        // per-run --extra-lsndir output (backup.go)
+	"target_tmp_*",                     // per-run --target-dir scratch (backup.go)
+	"incbase_tmp_*",                    // materialized parent checkpoints (backup.go)
+	"prepare_*",                        // prepared chain and extracted incrementals (restore.go; also prepare_inc_temp_*)
+	"pitr_binlogs_tmp",                 // decompressed binlogs (pitr.go)
+	filepath.Join("binlogs", "*.part"), // partial binlog archives (binlog.go)
+}
+
+// sweepStaleTempArtifacts removes temporary directories and partial binlog
+// archives left behind by crashed or killed mbkp runs. Removal failures are
+// logged, never fatal: the purge must not abort over the sweep. Honors
+// dryRun by only logging what would be removed.
+func sweepStaleTempArtifacts(ctx context.Context, backupDir string, dryRun bool) {
+	staleCutoff := time.Now().Add(-staleTempMaxAge)
+
+	seen := make(map[string]bool) // prepare_* also matches prepare_inc_temp_*
+	for _, pattern := range staleTempPatterns {
+		matches, err := filepath.Glob(filepath.Join(backupDir, pattern))
+		if err != nil {
+			slog.Warn("failed to scan for stale temporary artifacts", "pattern", pattern, "error", err)
+			continue
+		}
+		for _, path := range matches {
+			if seen[path] {
+				continue
+			}
+			seen[path] = true
+
+			if err := ctx.Err(); err != nil {
+				return
+			}
+
+			info, err := os.Stat(path)
+			if err != nil {
+				continue // vanished mid-sweep
+			}
+			if info.ModTime().After(staleCutoff) {
+				continue
+			}
+
+			if dryRun {
+				slog.Info("Would remove stale temporary artifact", "path", path, "mod_time", info.ModTime().Format(time.RFC3339), "dry_run", true)
+				continue
+			}
+			slog.Info("Removing stale temporary artifact", "path", path, "mod_time", info.ModTime().Format(time.RFC3339))
+			var rmErr error
+			if info.IsDir() {
+				rmErr = os.RemoveAll(path)
+			} else {
+				rmErr = os.Remove(path)
+			}
+			if rmErr != nil {
+				slog.Error("failed to remove stale temporary artifact", "path", path, "error", rmErr)
+			}
+		}
+	}
+}
+
+// PurgeBackups sweeps stale temporary artifacts from crashed runs, scans backups,
+// cleans up missing ones, applies the retention policy, and deletes expired files/metadata.
 func PurgeBackups(ctx context.Context, cfg *Config, retentionStr string, dryRun bool) error {
 	if err := ctx.Err(); err != nil {
 		return err
@@ -97,12 +169,17 @@ func PurgeBackups(ctx context.Context, cfg *Config, retentionStr string, dryRun 
 	cutoff := time.Now().Add(-retention)
 	slog.Info("Starting purge", "retention", retention, "cutoff", cutoff.Format(time.RFC3339), "dry_run", dryRun)
 
+	// 1. Sweep stale temporary artifacts left by crashed runs. This runs
+	// before the catalog is even opened so reclamation does not depend on
+	// backups.db being readable.
+	sweepStaleTempArtifacts(ctx, cfg.BackupDir, dryRun)
+
 	metaData, err := LoadMetadata(cfg.BackupDir)
 	if err != nil {
 		return fmt.Errorf("failed to load backup metadata: %w", err)
 	}
 
-	// 1. External Deletion Scan: Check if backup files are deleted outside mbkp
+	// 2. External Deletion Scan: Check if backup files are deleted outside mbkp
 	var activeBackups []BackupMetadata
 	for _, b := range metaData.Backups {
 		if err := ctx.Err(); err != nil {
@@ -130,7 +207,7 @@ func PurgeBackups(ctx context.Context, cfg *Config, retentionStr string, dryRun 
 		backupMap[b.ID] = b
 	}
 
-	// 2. Retention policy evaluation
+	// 3. Retention policy evaluation
 	keepIDs := make(map[string]bool)
 
 	for _, b := range activeBackups {
@@ -159,7 +236,7 @@ func PurgeBackups(ctx context.Context, cfg *Config, retentionStr string, dryRun 
 		}
 	}
 
-	// 3. Purge backups that should not be kept
+	// 4. Purge backups that should not be kept
 	for _, b := range metaData.Backups {
 		if err := ctx.Err(); err != nil {
 			return err
@@ -191,7 +268,7 @@ func PurgeBackups(ctx context.Context, cfg *Config, retentionStr string, dryRun 
 		}
 	}
 
-	// 4. Purge archived binlog files
+	// 5. Purge archived binlog files
 	// Find oldest kept completed backup
 	var oldestKeptBackup *BackupMetadata
 	for _, b := range activeBackups {
