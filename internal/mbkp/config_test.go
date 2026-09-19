@@ -451,3 +451,16 @@ func TestGetCommonArgs(t *testing.T) {
 		}
 	}
 }
+
+func TestLoadConfig_PortValidation(t *testing.T) {
+	t.Setenv("MBKP_BACKUP_DIR", t.TempDir())
+	t.Setenv("MARIADB_PORT", "70000")
+
+	_, err := LoadConfig("")
+	if err == nil {
+		t.Fatal("expected error for port > 65535, got nil")
+	}
+	if !strings.Contains(err.Error(), "invalid port") {
+		t.Errorf("expected error message to mention 'invalid port', got %v", err)
+	}
+}

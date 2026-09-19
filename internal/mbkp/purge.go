@@ -102,6 +102,7 @@ var staleTempPatterns = []string{
 	"prepare_*",                        // prepared chain and extracted incrementals (restore.go; also prepare_inc_temp_*)
 	"pitr_binlogs_tmp",                 // decompressed binlogs (pitr.go)
 	filepath.Join("binlogs", "*.part"), // partial binlog archives (binlog.go)
+	"mbkp-xtrabackup-*.cnf",            // temporary xtrabackup option files (backup.go)
 }
 
 // sweepStaleTempArtifacts removes temporary directories and partial binlog

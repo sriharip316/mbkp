@@ -146,6 +146,8 @@ func LoadConfig(backupDirFlag string) (*Config, error) {
 	port := v.GetInt("port")
 	if port <= 0 {
 		port = 3306
+	} else if port > 65535 {
+		return nil, fmt.Errorf("invalid port %d: must be between 1 and 65535", port)
 	}
 
 	tlsVerify := true

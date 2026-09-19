@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -266,5 +267,65 @@ func TestRunFullBackupFailsFastOnUnsafeXtrabackupPassword(t *testing.T) {
 	}
 	if len(meta.Backups) != 1 || meta.Backups[0].Status != "failed" {
 		t.Errorf("expected a single 'failed' catalog row, got %+v", meta.Backups)
+	}
+}
+
+func TestSanitizeBackupArgs(t *testing.T) {
+	args := []string{
+		"--backup",
+		"--defaults-extra-file=/tmp/secret.cnf",
+		"--target-dir=/backups",
+	}
+	sanitized := sanitizeBackupArgs(args)
+	if len(sanitized) != len(args) {
+		t.Fatalf("expected len %d, got %d", len(args), len(sanitized))
+	}
+	if sanitized[1] != "--defaults-extra-file=[REDACTED]" {
+		t.Errorf("expected redacted option file arg, got %q", sanitized[1])
+	}
+	if sanitized[0] != args[0] || sanitized[2] != args[2] {
+		t.Errorf("expected non-sensitive args unchanged, got %v", sanitized)
+	}
+}
+
+func TestNewBackupID_TimestampConsistency(t *testing.T) {
+	// Pin lastIDMilli to the last millisecond of the current second (…999),
+	// derived from the live clock so the monotonic-bump branch of
+	// newBackupID is always exercised: time.Now() cannot exceed this value
+	// within the current second, so ms is bumped to ms+1 — the first
+	// millisecond of the next second.
+	targetTime := time.Now().Truncate(time.Second).Add(999 * time.Millisecond)
+	ms := targetTime.UnixMilli()
+
+	lastIDMilliMu.Lock()
+	lastIDMilli = ms
+	lastIDMilliMu.Unlock()
+
+	// The timestamp in the ID must reflect the bumped millisecond — the next
+	// second with a 000 suffix — not the pre-bump one.
+	id := newBackupID("full_")
+	parts := strings.Split(strings.TrimPrefix(id, "full_"), "_")
+	if len(parts) != 3 {
+		t.Fatalf("unexpected id format: %s", id)
+	}
+
+	// Parse the date/time and millisecond parts
+	parsedTime, err := time.ParseInLocation("20060102_150405", parts[0]+"_"+parts[1], time.Local)
+	if err != nil {
+		t.Fatalf("failed to parse id timestamp %s_%s: %v", parts[0], parts[1], err)
+	}
+	milli, err := strconv.Atoi(parts[2])
+	if err != nil {
+		t.Fatalf("failed to parse id millisecond %s: %v", parts[2], err)
+	}
+	parsedMilli := parsedTime.UnixMilli() + int64(milli)
+
+	// The parsed time must match the monotonic ms reading exactly
+	lastIDMilliMu.Lock()
+	issuedMs := lastIDMilli
+	lastIDMilliMu.Unlock()
+
+	if parsedMilli != issuedMs {
+		t.Errorf("parsed time milli %d != issued ms %d", parsedMilli, issuedMs)
 	}
 }

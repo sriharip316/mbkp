@@ -118,6 +118,10 @@ func BackupBinlogs(ctx context.Context, cfg *Config) error {
 			_ = os.Remove(tmpPath)
 			return fmt.Errorf("failed to finalize archived binlog file %s: %w", binlog.LogName, err)
 		}
+		if d, err := os.Open(binlogsBackupDir); err == nil {
+			_ = d.Sync()
+			_ = d.Close()
+		}
 	}
 
 	slog.Info("Binlog archiving completed successfully.")
@@ -184,5 +188,11 @@ func compressAndCopyFile(ctx context.Context, src, dst string, comp Compressor) 
 	cmdCompress.Stdout = outFile
 	cmdCompress.Stderr = os.Stderr
 
-	return cmdCompress.Run()
+	if err := cmdCompress.Run(); err != nil {
+		return err
+	}
+	if err := outFile.Sync(); err != nil {
+		return fmt.Errorf("failed to sync archived file %s: %w", dst, err)
+	}
+	return outFile.Close()
 }

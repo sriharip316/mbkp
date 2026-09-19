@@ -251,7 +251,10 @@ func RunPITR(ctx context.Context, cfg *Config, targetTime time.Time, datadir str
 	slog.Info("Checking for database connection (polling up to 2 minutes)...")
 	connected := false
 	var dbErr error
-	for i := range 24 { // 24 * 5s = 120s
+	deadline := time.Now().Add(2 * time.Minute)
+	iteration := 0
+	for time.Now().Before(deadline) {
+		iteration++
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
@@ -259,7 +262,9 @@ func RunPITR(ctx context.Context, cfg *Config, targetTime time.Time, datadir str
 			return daemonDied()
 		default:
 		}
-		attemptCtx, cancel := context.WithTimeout(ctx, pitrConnectTimeout)
+		remaining := time.Until(deadline)
+		attemptTimeout := min(remaining, pitrConnectTimeout)
+		attemptCtx, cancel := context.WithTimeout(ctx, attemptTimeout)
 		db, err := cfg.ConnectDB(attemptCtx)
 		cancel()
 		if err == nil {
@@ -268,7 +273,7 @@ func RunPITR(ctx context.Context, cfg *Config, targetTime time.Time, datadir str
 			break
 		}
 		dbErr = err
-		slog.Info("Waiting for MariaDB server to start", "iteration", i+1, "max_iterations", 24)
+		slog.Info("Waiting for MariaDB server to start", "iteration", iteration)
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
@@ -417,7 +422,13 @@ func decompressFile(ctx context.Context, src, dst string) error {
 	cmdDecomp.Stdout = outFile
 	cmdDecomp.Stderr = os.Stderr
 
-	return cmdDecomp.Run()
+	if err := cmdDecomp.Run(); err != nil {
+		return err
+	}
+	if err := outFile.Sync(); err != nil {
+		return fmt.Errorf("failed to sync decompressed file %s: %w", dst, err)
+	}
+	return outFile.Close()
 }
 
 func findServerBinary() (string, error) {

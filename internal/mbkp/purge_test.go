@@ -449,6 +449,7 @@ func TestPurgeBackupsSweepsStaleTempArtifacts(t *testing.T) {
 		filepath.Join(tmpDir, "prepare_full_crashed"),
 		filepath.Join(tmpDir, "pitr_binlogs_tmp"),
 		filepath.Join(binlogsDir, "mysql-bin.000001.lz4.part"),
+		filepath.Join(tmpDir, "mbkp-xtrabackup-stale.cnf"),
 	}
 	// Fresh artifacts (within staleTempMaxAge) and unrelated files — must
 	// survive every purge.
@@ -456,6 +457,7 @@ func TestPurgeBackupsSweepsStaleTempArtifacts(t *testing.T) {
 		filepath.Join(tmpDir, "prepare_recent"), // e.g. restore --prepare-only output
 		filepath.Join(tmpDir, "full_recent.xbstream.gz"),
 		filepath.Join(binlogsDir, "mysql-bin.000002.lz4"),
+		filepath.Join(tmpDir, "mbkp-xtrabackup-recent.cnf"),
 	}
 
 	mkdir(stalePaths[0], stale)
@@ -463,9 +465,11 @@ func TestPurgeBackupsSweepsStaleTempArtifacts(t *testing.T) {
 	mkdir(stalePaths[2], stale)
 	mkdir(stalePaths[3], stale)
 	writeFile(stalePaths[4], stale)
+	writeFile(stalePaths[5], stale)
 	mkdir(keptPaths[0], now)
 	writeFile(keptPaths[1], now)
 	writeFile(keptPaths[2], now)
+	writeFile(keptPaths[3], now)
 
 	// Dry run: nothing may be removed.
 	if err := PurgeBackups(context.Background(), cfg, "7d", true); err != nil {
@@ -622,7 +626,7 @@ func TestPurgeBackupsDoesNotRepurgeMissingArchives(t *testing.T) {
 	if err := PurgeBackups(context.Background(), cfg, "5d", true); err != nil {
 		t.Fatalf("dry-run purge failed: %v", err)
 	}
-	for _, line := range strings.Split(logBuf.String(), "\n") {
+	for line := range strings.SplitSeq(logBuf.String(), "\n") {
 		if strings.Contains(line, "full_missing") && strings.Contains(line, "Would purge backup") {
 			t.Errorf("dry-run purge step re-listed a missing-archive row: %s", line)
 		}
@@ -637,7 +641,7 @@ func TestPurgeBackupsDoesNotRepurgeMissingArchives(t *testing.T) {
 	if err := PurgeBackups(context.Background(), cfg, "5d", false); err != nil {
 		t.Fatalf("purge failed: %v", err)
 	}
-	for _, line := range strings.Split(logBuf.String(), "\n") {
+	for line := range strings.SplitSeq(logBuf.String(), "\n") {
 		if strings.Contains(line, "full_missing") && strings.Contains(line, "Purging backup") {
 			t.Errorf("purge step re-processed a missing-archive row: %s", line)
 		}

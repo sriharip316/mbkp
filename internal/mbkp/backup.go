@@ -345,6 +345,7 @@ func newBackupID(prefix string) string {
 	lastIDMilli = ms
 	lastIDMilliMu.Unlock()
 
+	t = time.UnixMilli(ms)
 	return fmt.Sprintf("%s%s_%03d", prefix, t.Format("20060102_150405"), ms%1000)
 }
 
@@ -370,6 +371,19 @@ func isValidBackupID(id string) bool {
 	return backupIDRe.MatchString(id)
 }
 
+// sanitizeBackupArgs returns a copy of args with sensitive arguments redacted for logging.
+func sanitizeBackupArgs(args []string) []string {
+	sanitized := make([]string, len(args))
+	for i, a := range args {
+		if strings.HasPrefix(a, "--defaults-extra-file=") {
+			sanitized[i] = "--defaults-extra-file=[REDACTED]"
+		} else {
+			sanitized[i] = a
+		}
+	}
+	return sanitized
+}
+
 // streamBackup runs: <backupBin> <mariabackupArgs> | <comp> <compressArgs> > <archive>
 func streamBackup(ctx context.Context, cfg *Config, archive string, comp Compressor, mariabackupArgs []string) error {
 	// mariabackup and mariadb-backup take the password from the MYSQL_PWD
@@ -386,7 +400,7 @@ func streamBackup(ctx context.Context, cfg *Config, archive string, comp Compres
 		if strings.ContainsAny(cfg.Password, "\"\\\n\r") {
 			return fmt.Errorf("the database password contains a quote, backslash, or line break, which cannot be stored safely in the xtrabackup option file; use a password without those characters for xtrabackup-based servers")
 		}
-		tmpFile, err := os.CreateTemp("", "mbkp-xtrabackup-*.cnf")
+		tmpFile, err := os.CreateTemp(cfg.BackupDir, "mbkp-xtrabackup-*.cnf")
 		if err != nil {
 			return fmt.Errorf("failed to create temporary config file: %w", err)
 		}
@@ -427,10 +441,11 @@ func streamBackup(ctx context.Context, cfg *Config, archive string, comp Compres
 	cmdCompress.Stderr = os.Stderr
 
 	slog.Info("Running backup and compression command pipeline",
-		"mariabackup_bin", cfg.BackupBin, "mariabackup_args", mariabackupArgs, "compressor", comp.Name, "compress_args", comp.CompressArgs, "archive", archive)
+		"mariabackup_bin", cfg.BackupBin, "mariabackup_args", sanitizeBackupArgs(mariabackupArgs), "compressor", comp.Name, "compress_args", comp.CompressArgs, "archive", archive)
 
 	if err := cmdMariabackup.Start(); err != nil {
 		_ = outFile.Close()
+		_ = os.Remove(archive)
 		return fmt.Errorf("failed to start %s: %w", cfg.BackupBin, err)
 	}
 	if err := cmdCompress.Start(); err != nil {
@@ -443,7 +458,8 @@ func streamBackup(ctx context.Context, cfg *Config, archive string, comp Compres
 
 	mariabackupErr := cmdMariabackup.Wait()
 	compressErr := cmdCompress.Wait()
-	_ = outFile.Close()
+	syncErr := outFile.Sync()
+	closeErr := outFile.Close()
 
 	if err := ctx.Err(); err != nil {
 		_ = os.Remove(archive)
@@ -457,6 +473,14 @@ func streamBackup(ctx context.Context, cfg *Config, archive string, comp Compres
 	if compressErr != nil {
 		_ = os.Remove(archive)
 		return fmt.Errorf("%s failed: %w", comp.Name, compressErr)
+	}
+	if syncErr != nil {
+		_ = os.Remove(archive)
+		return fmt.Errorf("failed to sync archive file %s: %w", archive, syncErr)
+	}
+	if closeErr != nil {
+		_ = os.Remove(archive)
+		return fmt.Errorf("failed to close archive file %s: %w", archive, closeErr)
 	}
 	return nil
 }
