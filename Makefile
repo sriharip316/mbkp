@@ -105,6 +105,12 @@ release: release-check ## Build release archives for multiple OS/ARCH into dist/
 	@echo "Artifacts in $(DIST_DIR)/"
 	@echo "SHA256 sums:"; cat $(DIST_DIR)/sha256sums.txt
 
+.PHONY: release-snapshot
+release-snapshot: ## Run GoReleaser snapshot build into dist/ (requires goreleaser; no publish)
+	@command -v goreleaser >/dev/null 2>&1 || (echo "goreleaser not found; install from https://goreleaser.com/install/"; exit 1)
+	@echo "Running GoReleaser snapshot build (no publish)"
+	goreleaser release --snapshot --clean
+
 .PHONY: tag
 tag: ## Create and push git tag $(TAG)
 	@test -z "$(DIRTY)" || (echo "Working tree is dirty"; exit 1)

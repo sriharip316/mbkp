@@ -150,7 +150,14 @@ make cover   # Tests with a coverage profile; fails below MIN_COVER (default 40%
 make tidy    # go mod tidy; fails if go.mod/go.sum drifted
 make ci      # tidy + lint + test + cover (the typical CI pipeline)
 make clean   # Removes bin/, dist/, and coverage artifacts
+make release # Local-only artifact build for linux/amd64 into dist/ (official releases use GoReleaser instead)
+make release-snapshot # GoReleaser snapshot build of all release targets into dist/ (no publish; requires goreleaser)
 ```
+
+### CI & Release (GitHub Actions)
+*   **[.github/workflows/ci.yml](.github/workflows/ci.yml)**: On every push, runs `make ci` (with Codecov upload) and a `goreleaser-check` job that validates `.goreleaser.yaml` (`goreleaser check`) and cross-compiles every release target (`goreleaser build --snapshot --clean`), so release-config drift fails CI before a tag is ever pushed.
+*   **[.github/workflows/release.yml](.github/workflows/release.yml)**: On a `v*.*.*` tag push, runs GoReleaser (`goreleaser/goreleaser-action@v7`, `release --clean`), which builds CGO-free `tar.gz` archives for linux/darwin on amd64/arm64 (version injected via `-ldflags "-X main.version={{ .Version }}"` from the tag — same `main.version` variable as the Makefile build) plus `sha256sums.txt`, and publishes the GitHub release with GitHub-generated release notes. Tags with a pre-release suffix (e.g. `v1.2.3-rc1`) are marked as pre-releases. The release definition lives in [.goreleaser.yaml](.goreleaser.yaml); `make tag` still creates/pushes the tag that triggers it.
+*   **[.github/dependabot.yml](.github/dependabot.yml)**: Weekly Dependabot updates for the `gomod` and `github-actions` ecosystems, grouped into one PR per ecosystem with `deps:` / `ci:` commit-message prefixes.
 
 ### Interactive Demo Script
 A comprehensive demo script (`demo.sh`) is available to validate all functionality in an isolated environment. Select the database flavor with `--mariadb` (default) or `--mysql`:

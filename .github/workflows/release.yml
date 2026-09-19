@@ -1,57 +1,48 @@
 name: Release
 
 on:
-    push:
-        tags:
-            - "v*.*.*"
+  push:
+    tags:
+      - "v*.*.*"
 
 permissions:
-    contents: write
+  contents: write
 
 concurrency:
-    group: release-${{ github.ref }}
-    cancel-in-progress: false
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
 
 jobs:
-    release:
-        name: Build and publish release
-        runs-on: ubuntu-latest
-        steps:
-            - name: Checkout repository
-              uses: actions/checkout@v6
-              with:
-                  fetch-depth: 0
+  release:
+    name: Build and publish release
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
 
-            - name: Set up Go
-              uses: actions/setup-go@v6
-              with:
-                  go-version-file: go.mod
-                  cache: true
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache: true
 
-            - name: Show version from Makefile
-              run: make print-version
+      - name: Run GoReleaser
+        uses: goreleaser/goreleaser-action@v7
+        with:
+          distribution: goreleaser
+          version: "~> v2"
+          args: release --clean
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-            - name: Build release artifacts
-              run: make release
-
-            - name: Upload build artifacts to workflow
-              uses: actions/upload-artifact@v7
-              with:
-                  name: dist-${{ github.ref_name }}
-                  path: |
-                      dist/**
-                  if-no-files-found: error
-                  retention-days: 14
-
-            - name: Publish GitHub Release
-              uses: softprops/action-gh-release@v3
-              with:
-                  tag_name: ${{ github.ref_name }}
-                  name: mbkp ${{ github.ref_name }}
-                  draft: false
-                  prerelease: ${{ contains(github.ref_name, '-') }}
-                  generate_release_notes: true
-                  files: |
-                      dist/**
-              env:
-                  GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: Upload build artifacts to workflow
+        uses: actions/upload-artifact@v7
+        with:
+          name: dist-${{ github.ref_name }}
+          path: |
+            dist/*.tar.gz
+            dist/sha256sums.txt
+          if-no-files-found: error
+          retention-days: 14

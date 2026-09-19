@@ -1,6 +1,7 @@
 # mbkp - MariaDB Backup & Recovery Tool
 
 [![Go Version](https://img.shields.io/badge/Go-1.26+-00ADD8?style=flat&logo=go)](https://go.dev/)
+[![CI](https://github.com/sriharip316/mbkp/actions/workflows/ci.yml/badge.svg)](https://github.com/sriharip316/mbkp/actions/workflows/ci.yml)
 [![License](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
 **mbkp** is a powerful command-line tool for managing MariaDB physical backups, restores, and Point-in-Time Recovery (PITR). It provides automated incremental backups, binary log archiving, and intelligent retention policies with dependency-aware purging.
@@ -40,7 +41,16 @@
 
 ### From GitHub Release
 
-Download the latest release from the [GitHub Releases page](https://github.com/sriharip316/mbkp/releases/latest).
+Grab the archive for your platform from the [GitHub Releases page](https://github.com/sriharip316/mbkp/releases/latest). Releases are built with [GoReleaser](https://goreleaser.com) and ship `tar.gz` archives for **linux/amd64**, **linux/arm64**, **darwin/amd64**, and **darwin/arm64**, plus a `sha256sums.txt` checksum file:
+
+```bash
+# Example: install the linux/amd64 build of release v1.2.3
+# (asset names use the version without the "v" prefix)
+curl -sSL -o mbkp.tar.gz https://github.com/sriharip316/mbkp/releases/download/v1.2.3/mbkp-1.2.3-linux-amd64.tar.gz
+tar -xzf mbkp.tar.gz && sudo mv mbkp /usr/local/bin/
+```
+
+Verify the download against `sha256sums.txt` from the same release before installing.
 
 ### From Source
 
@@ -552,10 +562,19 @@ make cover
 | `make cover-html` | Generate HTML coverage report |
 | `make clean` | Remove build artifacts |
 | `make ci` | Run full CI pipeline (tidy, lint, test, cover) |
-| `make release` | Build release archives (linux/amd64) with SHA256 sums |
-| `make tag` | Create and push git tag |
+| `make release` | Build release archives (linux/amd64) with SHA256 sums (local-only; official releases use GoReleaser) |
+| `make release-snapshot` | GoReleaser snapshot build of all release targets into `dist/` (no publish; requires `goreleaser`) |
+| `make tag` | Create and push git tag (triggers the release workflow) |
 
 Run `make help` for the complete list.
+
+### CI & Release
+
+- **[CI](.github/workflows/ci.yml)** runs on every push: `make ci` (tidy, lint, tests with `-race`, coverage gate + Codecov upload), plus a `goreleaser-check` job that validates the release config (`goreleaser check`) and cross-compiles every release target (`goreleaser build --snapshot --clean`).
+- **[Release](.github/workflows/release.yml)** triggers on a `v*.*.*` tag push and runs [GoReleaser](https://goreleaser.com) (`release --clean`) using the [.goreleaser.yaml](.goreleaser.yaml) config: it builds CGO-free `tar.gz` archives for linux/darwin on amd64/arm64 with the version injected via ldflags, generates `sha256sums.txt`, and publishes the GitHub release with GitHub-generated release notes (tags with a pre-release suffix like `v1.2.3-rc1` are marked as pre-releases).
+- **[Dependabot](.github/dependabot.yml)** opens weekly PRs for Go module and GitHub Actions updates, grouped into one PR per ecosystem (`deps:` / `ci:` commit prefixes).
+
+To dry-run the full release pipeline locally without publishing, run `make release-snapshot`.
 
 ### Running Integration Tests
 
@@ -619,6 +638,10 @@ mbkp/
 │       ├── list.go        # Backup listing
 │       ├── lock.go        # Cross-process directory lock
 │       └── config.go      # Configuration loading
+├── .github/
+│   ├── dependabot.yml     # Dependabot config (gomod + GitHub Actions)
+│   └── workflows/         # CI and release workflows
+├── .goreleaser.yaml       # GoReleaser release configuration
 ├── demo.sh                # Interactive demo script
 ├── Makefile               # Build automation
 ├── go.mod                 # Go module definition
