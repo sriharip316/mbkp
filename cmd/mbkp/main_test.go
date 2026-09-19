@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/srihari/mbkp/internal/mbkp"
+	"github.com/sriharip316/mbkp/internal/mbkp"
 )
 
 func TestParseTargetTimeRFC3339(t *testing.T) {

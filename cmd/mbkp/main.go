@@ -11,7 +11,7 @@ import (
 	"time"
 
 	"github.com/spf13/cobra"
-	"github.com/srihari/mbkp/internal/mbkp"
+	"github.com/sriharip316/mbkp/internal/mbkp"
 )
 
 var (
@@ -46,11 +46,11 @@ Environment Variables:
     Password:   MARIADB_PASSWORD, MYSQL_PASSWORD, MYSQL_PWD, MARIADB_ROOT_PASSWORD, MYSQL_ROOT_PASSWORD
     Socket:     MARIADB_SOCKET, MYSQL_UNIX_PORT
 
-  TLS / SSL Settings:
-    CA Cert:    MARIADB_SSL_CA
-    Cert File:  MARIADB_SSL_CERT
-    Key File:   MARIADB_SSL_KEY
-    Verify SSL: MARIADB_SSL_VERIFY (default: true)
+  TLS / SSL Settings (checked in order of fallback):
+    CA Cert:    MARIADB_TLS_CA, MARIADB_SSL_CA
+    Cert File:  MARIADB_TLS_CERT, MARIADB_SSL_CERT
+    Key File:   MARIADB_TLS_KEY, MARIADB_SSL_KEY
+    Verify SSL: MARIADB_TLS_VERIFY, MARIADB_SSL_VERIFY (default: true)
 
   Backup Location:
     Backup Dir: MBKP_BACKUP_DIR (overridden by --backup-dir flag)`,

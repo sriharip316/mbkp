@@ -464,3 +464,45 @@ func TestLoadConfig_PortValidation(t *testing.T) {
 		t.Errorf("expected error message to mention 'invalid port', got %v", err)
 	}
 }
+
+func TestLoadConfig_TLSEnvAliases(t *testing.T) {
+	t.Setenv("MBKP_BACKUP_DIR", t.TempDir())
+	// Neutralize any ambient TLS/SSL settings so the cases below start clean;
+	// viper treats an empty-but-set variable as unset (allowEmptyEnv=false).
+	for _, name := range []string{
+		"MARIADB_TLS_CA", "MARIADB_TLS_CERT", "MARIADB_TLS_KEY", "MARIADB_TLS_VERIFY",
+		"MARIADB_SSL_CA", "MARIADB_SSL_CERT", "MARIADB_SSL_KEY", "MARIADB_SSL_VERIFY",
+	} {
+		t.Setenv(name, "")
+	}
+
+	// SSL-only: the legacy alias must reach the config on its own.
+	t.Setenv("MARIADB_SSL_CA", "/tmp/ssl-ca.pem")
+	t.Setenv("MARIADB_SSL_CERT", "/tmp/ssl-cert.pem")
+	t.Setenv("MARIADB_SSL_KEY", "/tmp/ssl-key.pem")
+	t.Setenv("MARIADB_SSL_VERIFY", "false")
+	cfgSSL, err := LoadConfig("")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cfgSSL.TLSCA != "/tmp/ssl-ca.pem" || cfgSSL.TLSCert != "/tmp/ssl-cert.pem" || cfgSSL.TLSKey != "/tmp/ssl-key.pem" {
+		t.Errorf("expected MARIADB_SSL_* alias values, got ca=%q cert=%q key=%q", cfgSSL.TLSCA, cfgSSL.TLSCert, cfgSSL.TLSKey)
+	}
+	if cfgSSL.TLSVerify {
+		t.Errorf("expected MARIADB_SSL_VERIFY=false to disable TLS verification")
+	}
+
+	// Both spellings set: the TLS name must win.
+	t.Setenv("MARIADB_TLS_CA", "/tmp/tls-ca.pem")
+	t.Setenv("MARIADB_TLS_VERIFY", "true")
+	cfgBoth, err := LoadConfig("")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cfgBoth.TLSCA != "/tmp/tls-ca.pem" {
+		t.Errorf("expected MARIADB_TLS_CA to take precedence, got %q", cfgBoth.TLSCA)
+	}
+	if !cfgBoth.TLSVerify {
+		t.Errorf("expected MARIADB_TLS_VERIFY to take precedence over MARIADB_SSL_VERIFY")
+	}
+}

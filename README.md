@@ -46,7 +46,7 @@ Download the latest release from the [GitHub Releases page](https://github.com/s
 
 ```bash
 # Clone the repository
-git clone https://github.com/srihari/mbkp.git
+git clone https://github.com/sriharip316/mbkp.git
 cd mbkp
 
 # Build the binary
@@ -59,7 +59,7 @@ make install
 ### Using Go Install
 
 ```bash
-go install github.com/srihari/mbkp/cmd/mbkp@latest
+go install github.com/sriharip316/mbkp/cmd/mbkp@latest
 ```
 
 ## 📦 Prerequisites
@@ -181,21 +181,21 @@ mbkp restore --datadir=/var/lib/mysql
 #### Restore Specific Backup
 
 ```bash
-mbkp restore --backup-id=20260614_103000 --datadir=/var/lib/mysql
-```
-
-#### Prepare-Only Mode
-
-Prepare the backup without copying it to the data directory (useful for validation):
-
-```bash
-mbkp restore --backup-id=20260614_103000 --prepare-only
+mbkp restore --backup-id=full_20260614_103000_123 --datadir=/var/lib/mysql
 ```
 
 **Important**: 
 - The target `--datadir` must be empty
 - Stop MariaDB before running restore
 - Ensure proper file ownership after restore
+
+#### Prepare-Only Mode
+
+Prepare the backup without copying it to the data directory (useful for validation):
+
+```bash
+mbkp restore --backup-id=full_20260614_103000_123 --prepare-only
+```
 
 #### Server Identity (MySQL/Percona)
 
@@ -220,7 +220,7 @@ Restore your database to a specific timestamp by automatically finding the appro
 # RFC3339 format
 mbkp pitr --target-time="2026-06-14T10:30:00Z" --datadir=/var/lib/mysql
 
-# Simple datetime format
+# Simple datetime format (interpreted in the host's local timezone)
 mbkp pitr --target-time="2026-06-14 10:30:00" --datadir=/var/lib/mysql
 ```
 
@@ -266,10 +266,12 @@ mbkp purge --retention=30d
 ```
 
 **Retention Format**: `<number><unit>` where unit is:
-- `h` - hours
-- `d` - days
-- `w` - weeks (7d)
-- `m` - months (30d)
+- `d` - days (e.g. `7d`, `30d`)
+- `h` - hours (e.g. `24h`)
+- `m` - **minutes**, `s` - seconds (standard Go duration units)
+
+> [!WARNING]
+> There are no week or month units: `m` means minutes, not months — `--retention=3m` purges everything older than **3 minutes**. Use `30d` for "about a month".
 
 **Smart Purging**:
 - Preserves parent backups needed for incremental restoration chains
@@ -296,12 +298,14 @@ mbkp purge --retention=30d
 
 #### TLS/SSL Settings
 
-| Variable | Description |
-|----------|-------------|
-| `MARIADB_SSL_CA` | Path to CA certificate |
-| `MARIADB_SSL_CERT` | Path to client certificate |
-| `MARIADB_SSL_KEY` | Path to client key |
-| `MARIADB_SSL_VERIFY` | Verify SSL (default: `true`) |
+Two spellings are accepted for each setting; when both are set, the `MARIADB_TLS_*` name wins:
+
+| Variable | Alias | Description |
+|----------|-------|-------------|
+| `MARIADB_TLS_CA` | `MARIADB_SSL_CA` | Path to CA certificate |
+| `MARIADB_TLS_CERT` | `MARIADB_SSL_CERT` | Path to client certificate |
+| `MARIADB_TLS_KEY` | `MARIADB_SSL_KEY` | Path to client key |
+| `MARIADB_TLS_VERIFY` | `MARIADB_SSL_VERIFY` | Verify SSL (default: `true`) |
 
 #### Backup Settings
 
@@ -325,26 +329,28 @@ See `mbkp <command> --help` for command-specific flags.
 
 ```
 <backup-dir>/
-├── backups.db                       # SQLite metadata catalog
-├── full_YYYYMMDD_HHMMSS.xbstream.gz # Full backup archives
-├── full_YYYYMMDD_HHMMSS.xbstream.lz4
-├── inc_YYYYMMDD_HHMMSS.xbstream.gz  # Incremental backup archives
-├── inc_YYYYMMDD_HHMMSS.xbstream.lz4
-├── binlogs/                         # Archived binary logs
+├── backups.db                                # SQLite metadata catalog
+├── .mbkp.lock                                # Advisory lock file (never deleted)
+├── full_YYYYMMDD_HHMMSS_mmm.xbstream.gz      # Full backup archives
+├── full_YYYYMMDD_HHMMSS_mmm.xbstream.lz4
+├── inc_YYYYMMDD_HHMMSS_mmm.xbstream.gz       # Incremental backup archives
+├── inc_YYYYMMDD_HHMMSS_mmm.xbstream.lz4
+├── binlogs/                                  # Archived binary logs
 │   ├── binlog.000001.gz
 │   ├── binlog.000001.lz4
 │   ├── binlog.000002.gz
 │   └── ...
-└── lsn/                             # LSN checkpoint tracking
-    ├── xtrabackup_checkpoints       # LSN position data
-    └── xtrabackup_info              # Backup metadata
+└── pitr_mariadbd.log                         # Log of the temporary PITR replay daemon
 ```
 
 **Naming Convention**:
-- Full backups: `full_YYYYMMDD_HHMMSS.xbstream.<ext>`
-- Incremental backups: `inc_YYYYMMDD_HHMMSS.xbstream.<ext>`
+- Full backups: `full_YYYYMMDD_HHMMSS_mmm.xbstream.<ext>`
+- Incremental backups: `inc_YYYYMMDD_HHMMSS_mmm.xbstream.<ext>`
 - Binary logs: `<binlog_filename>.<ext>`
 - Extension: `.lz4` (preferred) or `.gz` (fallback)
+- `mmm` is a millisecond suffix kept strictly monotonic, so two runs of the same type never share an ID
+
+Temporary working directories (`lsn_tmp_*`, `target_tmp_*`, `incbase_tmp_*`, `prepare_*`, `pitr_binlogs_tmp`) exist only while a run is in flight and are removed afterwards; leftovers from killed runs are reclaimed by `purge` after 24 hours.
 
 ### Metadata Schema
 
@@ -352,7 +358,7 @@ Backups are tracked in an SQLite database (`backups.db`) with the following sche
 
 ```sql
 CREATE TABLE backups (
-    id          TEXT PRIMARY KEY,        -- Timestamp-based backup ID
+    id          TEXT PRIMARY KEY,        -- Timestamp-based backup ID (full_/inc_ prefix + ms suffix)
     type        TEXT NOT NULL,           -- 'full' or 'incremental'
     status      TEXT NOT NULL,           -- 'in_progress', 'completed', 'failed'
     start_time  TEXT NOT NULL,           -- ISO8601 UTC timestamp
@@ -361,6 +367,7 @@ CREATE TABLE backups (
     binlog_file TEXT,                    -- Binlog filename at backup end (retention anchor)
     gtid        TEXT,                    -- GTID set at backup end (PITR replay boundary)
     parent_id   TEXT,                    -- Parent backup ID (NULL for full)
+    checkpoints TEXT                     -- Raw checkpoints file content (nullable)
 );
 ```
 
@@ -398,7 +405,7 @@ Full Backup (F1)
 
 **Restoration** requires applying the entire chain: F1 → I1 → I2 → I3
 
-**LSN Tracking**: All incremental backups reference a shared LSN directory for efficient chaining.
+**LSN Tracking**: Each backup's checkpoints file (the LSN position data) is captured at backup time via `--extra-lsndir` and stored in the catalog's `checkpoints` column, so an incremental always bases its delta on the recorded `parent_id`'s checkpoints — not whatever backup ran last.
 
 ## 📚 Examples
 
@@ -462,7 +469,7 @@ systemctl start mariadb
 ```bash
 # Prepare backup without copying to production
 mbkp restore \
-  --backup-id=20260614_020000 \
+  --backup-id=full_20260614_020000_042 \
   --prepare-only \
   --backup-dir=/backups
 
@@ -493,13 +500,15 @@ docker exec mariadb-restored \
 Want to see `mbkp` in action? Run the interactive demo script:
 
 ```bash
-./demo.sh
+./demo.sh --mariadb   # MariaDB 10.11 (default)
+./demo.sh --mysql     # Percona Server for MySQL 8.4 LTS (installs xtrabackup at runtime; needs network access in the container)
 ```
 
-This automated demo creates an isolated MariaDB container and walks through:
+This automated demo creates an isolated container and walks through:
 - Creating full, incremental, and binlog backups
 - Listing and purging backups with retention policies
-- Restoring full and incremental backups
+- Restoring full and incremental backups (verifying server-uuid preservation on the MySQL flavor)
+- Testing restore with `--new-server-uuid`
 - Performing Point-in-Time Recovery (PITR)
 - Validating data integrity throughout
 
@@ -511,7 +520,7 @@ Perfect for quickly understanding how `mbkp` works without affecting your produc
 
 ```bash
 # Clone repository
-git clone https://github.com/srihari/mbkp.git
+git clone https://github.com/sriharip316/mbkp.git
 cd mbkp
 
 # Install dependencies
@@ -536,23 +545,28 @@ make cover
 |--------|-------------|
 | `make build` | Build the CLI binary (local OS/ARCH) |
 | `make install` | Install to GOPATH/bin |
-| `make test` | Run unit tests |
+| `make test` | Run the full test suite with `-race` (includes the Podman E2E tests) |
 | `make lint` | Run linters (golangci-lint, go vet, gofmt, staticcheck) |
+| `make tidy` | `go mod tidy`; fails if go.mod/go.sum drifted |
 | `make cover` | Run tests with coverage report |
 | `make cover-html` | Generate HTML coverage report |
 | `make clean` | Remove build artifacts |
 | `make ci` | Run full CI pipeline (tidy, lint, test, cover) |
-| `make release` | Build release binaries for multiple platforms |
+| `make release` | Build release archives (linux/amd64) with SHA256 sums |
 | `make tag` | Create and push git tag |
+
+Run `make help` for the complete list.
 
 ### Running Integration Tests
 
-The project includes comprehensive end-to-end tests using Podman/Docker:
+The project includes comprehensive end-to-end tests using Podman. They orchestrate isolated source/recovery containers for a matrix of database images — MariaDB 10.11/11.4/11.8 and Percona Server for MySQL 8.0/8.4 — and validate the complete backup/restore/PITR/purge lifecycle:
 
 ```bash
 cd cmd/mbkp
 go test -v -run TestE2E
 ```
+
+Variants run in parallel by default; set `MBKP_E2E_SEQUENTIAL=1` to serialize them or `MBKP_SKIP_PERCONA=1` to skip the Percona variants.
 
 ### Interactive Demo Script
 
@@ -563,15 +577,16 @@ A complete demo script is available to showcase all `mbkp` features in an isolat
 ```
 
 **What the demo does**:
-1. Creates a MariaDB 10.11 container with binary logging enabled
+1. Creates a MariaDB 10.11 container (or Percona Server 8.4 with `--mysql`) with binary logging enabled
 2. Sets up a test database and table with auto-incrementing data
 3. Demonstrates full, incremental, and binlog backups
 4. Tests backup listing (table and JSON formats)
 5. Validates backup purging with retention policies
 6. Tests full backup restoration
 7. Tests incremental backup restoration
-8. Tests Point-in-Time Recovery (PITR)
-9. Verifies data integrity after each restore operation
+8. Tests restore with `--new-server-uuid`
+9. Tests Point-in-Time Recovery (PITR)
+10. Verifies data integrity after each restore operation
 
 **Requirements**:
 - `podman` installed and running
@@ -591,6 +606,7 @@ mbkp/
 ├── cmd/
 │   └── mbkp/              # CLI entry point
 │       ├── main.go        # Command definitions
+│       ├── main_test.go   # CLI unit tests
 │       └── e2e_test.go    # Integration tests
 ├── internal/
 │   └── mbkp/              # Core library
@@ -601,7 +617,9 @@ mbkp/
 │       ├── purge.go       # Retention & cleanup
 │       ├── metadata.go    # SQLite catalog
 │       ├── list.go        # Backup listing
+│       ├── lock.go        # Cross-process directory lock
 │       └── config.go      # Configuration loading
+├── demo.sh                # Interactive demo script
 ├── Makefile               # Build automation
 ├── go.mod                 # Go module definition
 ├── AGENTS.md              # AI developer guide
@@ -633,7 +651,7 @@ Contributions are welcome! Please feel free to submit issues, feature requests, 
 ## 📞 Support
 
 For issues, questions, or feature requests, please:
-- Open an issue on [GitHub](https://github.com/srihari/mbkp/issues)
+- Open an issue on [GitHub](https://github.com/sriharip316/mbkp/issues)
 - Check existing documentation in [AGENTS.md](AGENTS.md)
 
 ---

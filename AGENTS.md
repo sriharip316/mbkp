@@ -9,10 +9,10 @@ This guide is designed for **AI coding assistants** and **developers** working o
 The repository is structured as a standard Go CLI utility:
 
 *   **[cmd/mbkp/](cmd/mbkp)**: The CLI entry point and integration test suite.
-    *   **[main.go](cmd/mbkp/main.go)**: Handles CLI flag parsing, commands (`backup`, `restore`, `pitr`, `list`), and maps them to functions in `internal/mbkp`.
-    *   **[e2e_test.go](cmd/mbkp/e2e_test.go)**: Complete end-to-end integration tests using Podman to orchestrate isolated MariaDB source/recovery containers.
+    *   **[main.go](cmd/mbkp/main.go)**: Handles CLI flag parsing, commands (`backup`, `restore`, `pitr`, `list`, `purge`), and maps them to functions in `internal/mbkp`.
+    *   **[e2e_test.go](cmd/mbkp/e2e_test.go)**: Complete end-to-end integration tests using Podman to orchestrate isolated source/recovery containers for a matrix of database images (MariaDB 10.11/11.4/11.8 and Percona Server for MySQL 8.0/8.4).
 *   **[internal/mbkp/](internal/mbkp)**: Core package containing database utilities, physical backup/restore mechanics, binary log processing, and metadata catalog management.
-    *   **[config.go](internal/mbkp/config.go)**: Defines the [`Config`](internal/mbkp/config.go#L15-L26) struct and environments/flags loading.
+    *   **[config.go](internal/mbkp/config.go)**: Defines the [`Config`](internal/mbkp/config.go#L43-L58) struct and environments/flags loading.
     *   **[backup.go](internal/mbkp/backup.go)**: Performs physical full ([`RunFullBackup`](internal/mbkp/backup.go)) and incremental ([`RunIncrementalBackup`](internal/mbkp/backup.go)) backups with context cancellation by streaming `mariabackup` output to compression pipelines.
     *   **[restore.go](internal/mbkp/restore.go)**: Implements backup lineage resolution, decompression, multi-stage preparation, and copy-back ([`RestoreBackup`](internal/mbkp/restore.go)).
     *   **[pitr.go](internal/mbkp/pitr.go)**: Manages Point-in-Time Recovery ([`RunPITR`](internal/mbkp/pitr.go)) by restoring the closest preceding physical backup and applying archived binlogs via `mariadb-binlog` and `mariadb`.
@@ -27,13 +27,15 @@ The repository is structured as a standard Go CLI utility:
 ## ⚙️ Configuration & Database Schema
 
 ### 1. Configuration (`Config`)
-The database connection arguments are mapped inside the `Config` struct. Connection details are loaded using **Viper** from both MariaDB-specific or MySQL-generic environment variables (without reading configuration files):
+The database connection and tool settings are mapped inside the `Config` struct. All settings are loaded using **Viper** from environment variables only (no configuration files are read); MariaDB-specific names take precedence over MySQL-generic ones:
 *   **Host**: `MARIADB_HOST` / `MYSQL_HOST` (default: `localhost`)
-*   **Port**: `MARIADB_PORT` / `MYSQL_PORT` (default: `3306`)
+*   **Port**: `MARIADB_PORT` / `MYSQL_PORT` (default: `3306`; a value above 65535 is rejected)
 *   **User**: `MARIADB_USER` / `MYSQL_USER` (default: `root`)
 *   **Password**: Checked sequentially: `MARIADB_PASSWORD` ➡️ `MYSQL_PASSWORD` ➡️ `MYSQL_PWD` ➡️ `MARIADB_ROOT_PASSWORD` ➡️ `MYSQL_ROOT_PASSWORD`.
-*   **Backup Directory**: Configured via the `--backup-dir` flag (bound through Cobra) or the `MBKP_BACKUP_DIR` environment variable.
-*   **BackupBin**: Auto-detected at startup by `detectBackupTools()`. Prefers `mariadb-backup` (MariaDB 11.x), falls back to `mariabackup` (MariaDB 10.x), then `xtrabackup` (Percona/MySQL). Stored in `Config.BackupBin`.
+*   **Socket**: `MARIADB_SOCKET` / `MYSQL_UNIX_PORT` (optional; when set, DSNs and client-tool args use the Unix socket instead of TCP host/port, and the PITR replay daemon runs socket-only with `--skip-networking`).
+*   **TLS**: `MARIADB_TLS_CA`, `MARIADB_TLS_CERT`, `MARIADB_TLS_KEY`, `MARIADB_TLS_VERIFY` (default `true`), each with a `MARIADB_SSL_*` fallback alias (`MARIADB_SSL_CA`, …) — the TLS spelling wins when both are set. When a CA or client certificate is configured, DSNs get a registered TLS config (see the TLS guideline below) and client tools get `--ssl*` arguments.
+*   **Backup Directory**: Configured via the `--backup-dir` flag (bound through Cobra) or the `MBKP_BACKUP_DIR` environment variable; the flag wins.
+*   **BackupBin**: Auto-detected at startup by `detectBackupTools()`. Prefers `mariadb-backup` (MariaDB 11.x), falls back to `mariabackup` (MariaDB 10.x), then `xtrabackup` (Percona/MySQL); if none is found it warns and defaults to the MariaDB toolset (the first invocation then surfaces the error). Stored in `Config.BackupBin`.
 *   **StreamBin**: The stream-extract binary paired with the backup tool — `mbstream` for MariaDB tooling, `xbstream` for Percona XtraBackup. Stored in `Config.StreamBin`.
 *   **BinlogBin**: The binlog replay binary — `mariadb-binlog` (MariaDB) or `mysqlbinlog` (MySQL/Percona), detected individually. Stored in `Config.BinlogBin`.
 *   **ClientBin**: The MySQL command-line client — `mariadb` (MariaDB) or `mysql` (MySQL/Percona), detected individually. Stored in `Config.ClientBin`.
@@ -102,10 +104,12 @@ To restore an incremental backup, the system must rebuild the state step-by-step
 6.  **Copy-Back**: Verify target data directory is empty (validated upfront before the expensive prepare to fail fast), then run `mariabackup --copy-back --target-dir=<prepareDir> --datadir=<datadir>`.
 7.  **Server Identity (MySQL/Percona only)**: After copy-back, rebuild `<datadir>/auto.cnf` from the `server_uuid` line recorded in the prepared backup's `backup-my.cnf` (xtrabackup deliberately excludes `auto.cnf` from archives but records the UUID there — note it uses the underscore spelling `server_uuid`, while `auto.cnf` uses `server-uuid`). This keeps `gtid_executed` a single-UUID set across recovery generations instead of fragmenting it (`A:1-100,B:1-5,…`) with a fresh UUID per restore. MariaDB restores never touch `auto.cnf` (its GTIDs are `domain-server_id-seq` based). The `--new-server-uuid` flag (`restore` and `pitr` commands) opts out: no `auto.cnf` is written (and any stale one surviving copy-back is removed), so the server generates a fresh UUID on first start. A missing/malformed UUID in `backup-my.cnf` degrades to the old behavior with a warning; a failure to write `auto.cnf` fails the restore.
 
+The `restore --prepare-only` flag stops after step 5: the prepared files are left in `prepare_<backupID>` (reported in the log) for inspection or manual copy-back, `--datadir` is not required, and the directory is reclaimed by `purge`'s stale-temp sweep once older than 24 hours.
+
 ### 3. Point-in-Time Recovery (PITR)
 Point-in-Time Recovery automates recovery to a precise timestamp. Replay is **GTID-based** — the recorded position-based mechanism was removed:
 1.  Query SQLite database for the closest completed backup (full or incremental) that finished **before** the target timestamp.
-2.  Fail fast (before restoring) if the base backup has no recorded GTID set (server ran without GTIDs, or capture failed at backup time).
+2.  Fail fast (before restoring) if the base backup has no recorded GTID set (server ran without GTIDs, or capture failed at backup time), or if no binlog filename was recorded (the archive-completeness check in step 6 needs it).
 3.  Perform the full restore workflow of that base backup to the target `--datadir` (including the `auto.cnf` server-identity step for MySQL/Percona, so the replay daemon — and any server started on the datadir afterwards — adopts the backed-up `server-uuid`; pass `--new-server-uuid` to `pitr` for a fresh identity).
 4.  Automatically start a local temporary database daemon (`mariadbd` or `mysqld`) in the background, bound to `127.0.0.1` or socket-only, and poll for readiness (up to 2 minutes). A watcher goroutine owns `cmdDaemon.Wait()`: if the daemon process exits during the readiness poll (bad datadir permissions being the classic cause), the poll aborts immediately with the daemon's exit status and the `pitr_mariadbd.log` path instead of waiting out the full timeout. Each connect attempt is bounded (a 10s per-attempt context, plus 5s dial / 30s read DSN timeouts from `GetDSN`), so a hung network path cannot stall the loop. For MySQL-family servers the replay daemon is started with `--gtid-mode=ON --enforce-gtid-consistency=ON` (the replay stream carries `SET GTID_NEXT` statements).
 5.  Read the `gtid` and `binlog_file` recorded for that restored backup.
@@ -128,7 +132,7 @@ The `purge` command enforces the backup retention policy:
 1.  **Parse & Cutoff**: Parse retention duration (e.g. `7d`, `30d`; day multipliers are guarded against `time.Duration` integer overflow) and compute the cutoff timestamp `now - retention`.
 2.  **Sweep Crash Leftovers**: Remove temporary directories (`lsn_tmp_*`, `target_tmp_*`, `incbase_tmp_*`, `prepare_*`, `pitr_binlogs_tmp`), temporary `mbkp-xtrabackup-*.cnf` option files, and partial `binlogs/*.part` archives older than 24 hours (`staleTempMaxAge`) — leftovers from killed runs whose in-process defers never executed. This runs before the catalog is opened, so reclamation does not depend on `backups.db` being readable, and it honors `--dry-run`. Removal failures are logged, never fatal.
 3.  **External Cleanup**: Scan the metadata catalog. If any archive file is missing from disk, print a warning and delete its metadata record from SQLite.
-4.  **Lineage Protection**: Identify completed backups within the retention window. Trace their restoration lineage chain. Mark all ancestors (parents/grandparents) to be kept so that the active backups remain restorable.
+4.  **Lineage Protection**: Identify backups to keep. Completed backups whose end time is within the retention window have their entire lineage chain resolved and marked to be kept so they remain restorable; a completed backup whose chain cannot be resolved (corrupted catalog) is instead logged and becomes eligible for purging. Failed or in-progress rows whose start time is within the window are also kept (no lineage tracing — they are not restorable anyway).
 5.  **Clean Archives & Metadata**: Delete any backup archive files not marked to be kept from the disk and delete their SQLite metadata records.
 6.  **Prune Binlogs**: Find the earliest binlog file required by the oldest kept backup. If the oldest kept backup has no recorded binlog file (unknown boundary), all archived binlogs are safely retained to prevent data loss. Otherwise, delete archived binlog files from disk only if they are both expired (older than the cutoff time) and older than that earliest required binlog file.
 
@@ -137,13 +141,15 @@ The `purge` command enforces the backup retention policy:
 ## 🧪 Local Setup & Verification Runbook
 
 ### Makefile Targets
-Run build and sanity checks locally:
+Run build and sanity checks locally (all targets are listed by `make help`):
 ```bash
-make build   # Builds the 'mbkp' binary locally
-make test    # Runs internal unit tests
-make fmt     # Format Go source code files
-make lint    # Run vet tests
-make clean   # Cleans local binaries and logs
+make build   # Builds the 'mbkp' binary into bin/ (version injected from git state)
+make test    # Runs the full test suite (go test -race -count=1 ./...), including the E2E tests (they need podman)
+make lint    # golangci-lint if installed, else go vet; also fails on gofmt diffs, and runs staticcheck if installed
+make cover   # Tests with a coverage profile; fails below MIN_COVER (default 40%)
+make tidy    # go mod tidy; fails if go.mod/go.sum drifted
+make ci      # tidy + lint + test + cover (the typical CI pipeline)
+make clean   # Removes bin/, dist/, and coverage artifacts
 ```
 
 ### Interactive Demo Script
@@ -190,7 +196,7 @@ cd cmd/mbkp
 go test -v -run TestE2E
 ```
 
-These tests use Podman/Docker to orchestrate isolated MariaDB containers and validate the complete backup/restore lifecycle.
+These tests use Podman to orchestrate isolated source/recovery containers for every variant in `testVariants` — MariaDB 10.11/11.4/11.8 and Percona Server for MySQL 8.0/8.4 (the Percona variants install xtrabackup into the container at runtime) — and validate the complete backup/restore/PITR/purge lifecycle. Variants run in parallel by default; set `MBKP_E2E_SEQUENTIAL=1` to serialize them or `MBKP_SKIP_PERCONA=1` to skip the Percona variants. There is no skip guard when podman is missing, so the suite fails rather than silently passing.
 
 ---
 

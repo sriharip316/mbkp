@@ -116,10 +116,14 @@ func LoadConfig(backupDirFlag string) (*Config, error) {
 	_ = v.BindEnv("user", "MARIADB_USER", "MYSQL_USER")
 	_ = v.BindEnv("password", "MARIADB_PASSWORD", "MYSQL_PASSWORD", "MYSQL_PWD", "MARIADB_ROOT_PASSWORD", "MYSQL_ROOT_PASSWORD")
 	_ = v.BindEnv("socket", "MARIADB_SOCKET", "MYSQL_UNIX_PORT")
-	_ = v.BindEnv("tls_ca", "MARIADB_TLS_CA")
-	_ = v.BindEnv("tls_cert", "MARIADB_TLS_CERT")
-	_ = v.BindEnv("tls_key", "MARIADB_TLS_KEY")
-	_ = v.BindEnv("tls_verify", "MARIADB_TLS_VERIFY")
+	// MARIADB_SSL_* are accepted as fallback aliases of the MARIADB_TLS_*
+	// names (older documentation and mbkp --help advertised the SSL
+	// spelling); viper checks each list in order, so the TLS name wins when
+	// both are set.
+	_ = v.BindEnv("tls_ca", "MARIADB_TLS_CA", "MARIADB_SSL_CA")
+	_ = v.BindEnv("tls_cert", "MARIADB_TLS_CERT", "MARIADB_SSL_CERT")
+	_ = v.BindEnv("tls_key", "MARIADB_TLS_KEY", "MARIADB_SSL_KEY")
+	_ = v.BindEnv("tls_verify", "MARIADB_TLS_VERIFY", "MARIADB_SSL_VERIFY")
 	_ = v.BindEnv("backup_dir", "MBKP_BACKUP_DIR")
 
 	// Set default values
