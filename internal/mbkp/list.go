@@ -51,14 +51,14 @@ func listTable(backupDir string, meta *Metadata) error {
 
 	// Header
 	_, _ = fmt.Fprintln(w, "ID\tTYPE\tSTATUS\tSTARTED\tDURATION\tSIZE\tBINLOG\tPARENT")
-	_, _ = fmt.Fprintln(w, strings.Repeat("-", 20)+"\t"+
+	_, _ = fmt.Fprintln(w, strings.Repeat("-", 24)+"\t"+
 		strings.Repeat("-", 11)+"\t"+
 		strings.Repeat("-", 11)+"\t"+
 		strings.Repeat("-", 19)+"\t"+
 		strings.Repeat("-", 9)+"\t"+
 		strings.Repeat("-", 9)+"\t"+
 		strings.Repeat("-", 24)+"\t"+
-		strings.Repeat("-", 20))
+		strings.Repeat("-", 24))
 
 	for _, b := range meta.Backups {
 		started := b.StartTime.Local().Format("2006-01-02 15:04:05")
